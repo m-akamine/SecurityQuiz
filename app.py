@@ -40,8 +40,19 @@ from quiz_core import (
 
 APP_TITLE = "セキュリティ〇×クイズ"
 QUESTION_FILE = Path(__file__).with_name("261113セキュリティクイズ問題.json")
+BACKGROUND_FILE = Path(__file__).with_name("BackgroundImage_Clean.png")
+PANEL = "#0B1D26"
+SUBPANEL = "#102A36"
+CYAN = "#00E5FF"
+AMBER = "#FBBF24"
+WHITE = "#F0F9FF"
+PALE_CYAN = "#BAE6FD"
+GREEN = "#059669"
+RED = "#E11D48"
+MAGENTA = "#FF00FF"
 START_COUNTDOWN_SECONDS = 10
 RESULT_SCREEN_SECONDS = 5
+WIN_SCREEN_SECONDS = 10
 QUESTION_INTRO_SECONDS = 2
 FACE_RECOVERY_SECONDS = 10
 COUNTDOWN_FACE_LOSS_GRACE_SECONDS = 2.0
@@ -432,12 +443,14 @@ class SecurityQuizApp:
         self.root.geometry("1280x760")
         self.root.minsize(960, 600)
         self.root.state("zoomed")
-        self.root.configure(bg="#101827")
+        self.root.attributes("-fullscreen", True)
+        self.root.configure(bg=PANEL)
         self.root.protocol("WM_DELETE_WINDOW", self.close)
         self.root.bind("<space>", self._space_pressed)
         self.root.bind("<c>", self._camera_test_pressed)
         self.root.bind("<Control-Shift-q>", self._staff_cancel)
         self.root.bind("<F12>", self._staff_cancel)
+        self.root.bind("<F11>", self._toggle_fullscreen)
         self.root.bind("<Escape>", self._escape_pressed)
 
         self.sets: dict[int, list[dict]] = {}
@@ -446,6 +459,16 @@ class SecurityQuizApp:
             self.sets = load_question_sets(QUESTION_FILE)
         except QuestionDataError as error:
             self.setup_errors.append(str(error))
+
+        self.background_image = None
+        self.background_photo = None
+        self.background_size: tuple[int, int] | None = None
+        if Image is not None:
+            try:
+                with Image.open(BACKGROUND_FILE) as image:
+                    self.background_image = image.convert("RGB")
+            except OSError as error:
+                self.setup_errors.append(f"背景画像を読み込めません: {error}")
 
         self.speech: LocalSpeech | None = None
         try:
@@ -487,7 +510,7 @@ class SecurityQuizApp:
             self.camera_devices = []
 
         self.canvas = tk.Canvas(
-            root, bg="#101827", highlightthickness=0, borderwidth=0
+            root, bg=PANEL, highlightthickness=0, borderwidth=0
         )
         self.canvas.pack(fill="both", expand=True)
         self.status_var = tk.StringVar(value="カメラを確認しています…")
@@ -495,8 +518,8 @@ class SecurityQuizApp:
             root,
             textvariable=self.status_var,
             font=(self.font_family, 13),
-            fg="#ffffff",
-            bg="#101827",
+            fg=WHITE,
+            bg=PANEL,
             anchor="w",
             padx=24,
             pady=8,
@@ -561,6 +584,11 @@ class SecurityQuizApp:
 
         self.canvas.bind("<Configure>", lambda _event: self._render())
         self._update()
+
+    def _toggle_fullscreen(self, _event: tk.Event) -> str:
+        fullscreen = bool(self.root.attributes("-fullscreen"))
+        self.root.attributes("-fullscreen", not fullscreen)
+        return "break"
 
     def _space_pressed(self, _event: tk.Event) -> str | None:
         if self.mode == "home":
@@ -890,7 +918,8 @@ class SecurityQuizApp:
     def _advance_phase(self) -> None:
         now = time.monotonic()
         if self.mode in ("notice", "win", "lose"):
-            if now - self.phase_started >= RESULT_SCREEN_SECONDS:
+            duration = WIN_SCREEN_SECONDS if self.mode == "win" else RESULT_SCREEN_SECONDS
+            if now - self.phase_started >= duration:
                 self.home_message = self.end_message if self.mode == "notice" else ""
                 self.mode = "home"
             return
@@ -1118,9 +1147,8 @@ class SecurityQuizApp:
                 "  |  カメラ使用中・映像は保存／外部送信しません"
             )
         if self.mode == "reveal":
-            remaining = max(0.0, 5 - (time.monotonic() - self.phase_started))
             return (
-                f"正解発表: 残り{int(remaining + 0.999)}秒で解説へ"
+                "正解発表中 | まもなく解説へ"
                 "  |  カメラ使用中・映像は保存／外部送信しません"
             )
         if self.mode == "explanation":
@@ -1129,9 +1157,8 @@ class SecurityQuizApp:
                 "  |  カメラ使用中・映像は保存／外部送信しません"
             )
         if self.mode == "exit":
-            remaining = max(0.0, 3 - (time.monotonic() - self.phase_started))
             return (
-                f"退場時間: 残り{int(remaining + 0.999)}秒"
+                "退場時間中 | 不正解の参加者はカメラ範囲から出てください"
                 "  |  カメラ使用中・映像は保存／外部送信しません"
             )
         return (
@@ -1146,50 +1173,53 @@ class SecurityQuizApp:
         self.canvas.delete("all")
         width = max(self.canvas.winfo_width(), 1)
         height = max(self.canvas.winfo_height(), 1)
+        self._render_background(width, height)
         if self.face_loss_since is not None:
             self._render_face_recovery(width, height, self.face_loss_since)
         elif self.mode == "home":
-            self.canvas.configure(bg="#101827")
+            self._panel(width * 0.025, height * 0.04, width * 0.975, height * 0.96)
             self.canvas.create_text(
                 width / 2,
-                height * 0.20,
+                height * 0.17,
                 text=APP_TITLE,
-                fill="#ffffff",
-                font=(self.font_family, 40, "bold"),
+                fill=WHITE,
+                font=(self.font_family, 60, "bold"),
             )
             self.canvas.create_text(
                 width / 2,
-                height * 0.37,
+                height * 0.36,
                 text="カメラの前で左右に移動して〇×に答えよう！",
-                fill="#dbeafe",
+                fill=PALE_CYAN,
                 font=(self.font_family, 24),
             )
             self.canvas.create_text(
                 width / 2,
-                height * 0.48,
+                height * 0.47,
                 text="〇  左へ移動                 ×  右へ移動",
-                fill="#ffffff",
+                fill=WHITE,
                 font=(self.font_family, 26, "bold"),
             )
             self.canvas.create_text(
                 width / 2,
-                height * 0.63,
+                height * 0.70,
                 text=(
                     "ホーム画面で顔を1〜5人認識すると、自動で10秒カウントダウン後に出題します。\n"
                     "カウントダウン中に顔を認識できなくなると、カウントダウン前のホーム画面に戻ります。\n"
                     "顔位置を画面に表示するためだけに使い、顔認証・本人特定はしません。\n"
-                    "カメラ映像・画像は保存せず、外部へ送信しません。"
+                    "カメラ映像・画像は保存せず、外部へ送信しません。\n"
+                    "F11：全画面切替　 Alt+F4：終了"
                 ),
-                fill="#bfdbfe",
-                font=(self.font_family, 17),
+                fill=PALE_CYAN,
+                font=(self.font_family, 14),
+                width=width * 0.90,
                 justify="center",
             )
             if self.setup_errors or self.camera_error:
                 self.canvas.create_text(
                     width / 2,
-                    height * 0.83,
+                    height * 0.90,
                     text="開始できません。下のスタッフ向け表示を確認してください。",
-                    fill="#fecaca",
+                    fill=AMBER,
                     font=(self.font_family, 16, "bold"),
                 )
         elif self.mode == "camera_test":
@@ -1199,12 +1229,12 @@ class SecurityQuizApp:
         elif self.mode in ("win", "lose", "notice"):
             self._render_end_screen(width, height)
         elif self.mode == "question_intro":
-            self.canvas.configure(bg="#101827")
+            self._panel(width * 0.12, height * 0.2, width * 0.88, height * 0.8)
             self.canvas.create_text(
                 width / 2,
                 height / 2,
                 text=f"第{self.question_index + 1}問",
-                fill="#ffffff",
+                fill=WHITE,
                 font=(self.font_family, 72, "bold"),
             )
         elif self.mode in ("question", "explanation"):
@@ -1261,68 +1291,85 @@ class SecurityQuizApp:
             state="normal" if can_start else "disabled",
         )
 
+    def _render_background(self, width: int, height: int) -> None:
+        if self.background_image is None:
+            return
+        if self.background_size != (width, height):
+            image = self.background_image.resize(
+                (width, height), Image.Resampling.LANCZOS
+            )
+            self.background_photo = ImageTk.PhotoImage(image, master=self.root)
+            self.background_size = (width, height)
+        self.canvas.create_image(0, 0, image=self.background_photo, anchor="nw")
+
+    def _panel(
+        self, left: float, top: float, right: float, bottom: float,
+        *, fill: str = PANEL, outline: str = CYAN, border: int = 2,
+    ) -> int:
+        return self.canvas.create_rectangle(
+            left, top, right, bottom, fill=fill, outline=outline, width=border
+        )
+
     def _render_face_recovery(
         self, width: int, height: int, loss_started: float
     ) -> None:
         remaining = max(
             0, math.ceil(FACE_RECOVERY_SECONDS - (time.monotonic() - loss_started))
         )
-        self.canvas.configure(bg="#101827")
+        self._panel(width * 0.1, height * 0.15, width * 0.9, height * 0.85)
         self.canvas.create_text(
             width / 2, height * 0.3,
             text="参加者の顔を確認しています",
-            fill="#ffffff", font=(self.font_family, 36, "bold"),
+            fill=WHITE, font=(self.font_family, 36, "bold"),
         )
         self.canvas.create_text(
             width / 2, height * 0.5,
             text=str(remaining),
-            fill="#facc15", font=(self.font_family, 72, "bold"),
+            fill=AMBER, font=(self.font_family, 72, "bold"),
         )
         self.canvas.create_text(
             width / 2, height * 0.7,
             text="カメラの方を向いてお待ちください",
-            fill="#dbeafe", font=(self.font_family, 24),
+            fill=PALE_CYAN, font=(self.font_family, 24),
         )
 
     def _render_reading(
         self, width: int, height: int, title: str, text: str
     ) -> None:
-        self.canvas.configure(bg="#101827")
         self.canvas.create_text(
             width / 2,
             height * 0.13,
             text=title,
-            fill="#facc15",
+            fill=AMBER,
             font=(self.font_family, 40, "bold"),
         )
-        self.canvas.create_rectangle(
-            32, height * 0.22, width - 32, height * 0.88,
-            fill="#1e293b", outline="#93c5fd", width=3,
-        )
+        self._panel(width * 0.05, height * 0.22, width * 0.95, height * 0.92)
         size = min(52, max(28, int(width / 25)))
         text_id = self.canvas.create_text(
             width / 2,
             height * 0.55,
             text=text,
-            fill="#ffffff",
+            fill=WHITE if title == "問題" else PALE_CYAN,
             font=(self.font_family, size, "bold"),
-            width=width - 100,
+            width=width * 0.82,
             justify="center",
         )
         bounds = self.canvas.bbox(text_id)
-        while bounds and bounds[3] - bounds[1] > height * 0.60 and size > 20:
+        while bounds and bounds[3] - bounds[1] > height * 0.64 and size > 20:
             size -= 2
             self.canvas.itemconfigure(text_id, font=(self.font_family, size, "bold"))
             bounds = self.canvas.bbox(text_id)
 
     def _render_end_screen(self, width: int, height: int) -> None:
-        colors = {"win": "#14532d", "lose": "#78350f", "notice": "#1e293b"}
-        self.canvas.configure(bg=colors[self.mode])
+        self._panel(
+            width * 0.07, height * 0.16, width * 0.93, height * 0.84,
+            fill=SUBPANEL, outline=MAGENTA if self.mode == "lose" else CYAN,
+        )
         self.canvas.create_text(
             width / 2,
             height * 0.46,
             text=self.end_message,
-            fill="#ffffff",
+            fill=WHITE,
             font=(self.font_family, 44 if self.mode != "notice" else 30, "bold"),
             width=width - 100,
             justify="center",
@@ -1331,18 +1378,18 @@ class SecurityQuizApp:
             width / 2,
             height * 0.75,
             text="まもなくホーム画面に戻ります",
-            fill="#e2e8f0",
+            fill=PALE_CYAN,
             font=(self.font_family, 20),
         )
 
     def _render_home_wait(self, width: int, height: int) -> None:
-        self.canvas.configure(bg="#101827")
+        self._panel(width * 0.025, height * 0.04, width * 0.975, height * 0.96)
         self.canvas.create_text(
             width / 2,
-            height * 0.10,
+            height * 0.16,
             text=APP_TITLE,
-            fill="#ffffff",
-            font=(self.font_family, 26, "bold"),
+            fill=WHITE,
+            font=(self.font_family, 60, "bold"),
         )
         if self.mode == "waiting_for_players":
             message = self.home_message or "参加者の顔を確認しています。"
@@ -1359,28 +1406,31 @@ class SecurityQuizApp:
                 detail = "ゲーム開始まで"
         self.canvas.create_text(
             width / 2,
-            height * 0.30,
+            height * 0.34,
             text=detail,
-            fill="#ffffff",
+            fill=PALE_CYAN,
             font=(self.font_family, 30, "bold"),
         )
         self.canvas.create_text(
             width / 2,
-            height * 0.50,
+            height * 0.55,
             text=message,
-            fill="#facc15" if self.mode == "countdown" else "#dbeafe",
+            fill=AMBER if self.mode == "countdown" else PALE_CYAN,
             font=(self.font_family, 64 if self.mode == "countdown" else 30, "bold"),
             width=width - 100,
             justify="center",
         )
         self.canvas.create_text(
             width / 2,
-            height * 0.70,
+            height * 0.78,
             text=f"検出中の顔: {len(self.latest_detections)}人",
-            fill="#ffffff",
+            fill=WHITE,
             font=(self.font_family, 22),
         )
-        self._render_faces(width, height)
+        self._render_faces(
+            width, height,
+            face_bounds=(width * 0.05, height * 0.57, width * 0.95, height * 0.94),
+        )
 
     def _cancel_player_wait(self) -> None:
         if self.mode != "waiting_for_players":
@@ -1390,7 +1440,7 @@ class SecurityQuizApp:
         self._render()
 
     def _render_camera_test(self, width: int, height: int) -> None:
-        self.canvas.configure(bg="#101827")
+        self._panel(12, 4, width - 12, 48)
         self.canvas.create_text(
             width / 2,
             28,
@@ -1398,7 +1448,7 @@ class SecurityQuizApp:
                 f"カメラ確認  |  顔の検出数: {len(self.latest_faces)}人  |  "
                 "左右反転  |  映像は保存・送信されません  |  Escで戻る"
             ),
-            fill="#ffffff",
+            fill=WHITE,
             font=(self.font_family, 18, "bold"),
         )
         if self.latest_frame is None:
@@ -1406,7 +1456,7 @@ class SecurityQuizApp:
                 width / 2,
                 height / 2,
                 text="カメラ映像を待っています…",
-                fill="#ffffff",
+                fill=WHITE,
                 font=(self.font_family, 24),
             )
             return
@@ -1432,121 +1482,102 @@ class SecurityQuizApp:
                 image_y + y * scale,
                 image_x + (x + box_width) * scale,
                 image_y + (y + box_height) * scale,
-                outline="#22c55e",
+                outline=GREEN,
                 width=3,
             )
 
     def _render_game(self, width: int, height: int) -> None:
-        self.canvas.configure(bg="#101827")
-        self.canvas.create_rectangle(
-            0, 0, width / 2, height, fill="#14532d", outline=""
-        )
-        self.canvas.create_rectangle(
-            width / 2, 0, width, height, fill="#7f1d1d", outline=""
-        )
-        self.canvas.create_line(
-            width / 2, 0, width / 2, height, fill="#ffffff", width=4
-        )
-        self.canvas.create_text(
-            width * 0.25,
-            height * 0.14,
-            text="〇",
-            fill="#ffffff",
-            font=(self.font_family, 56, "bold"),
-        )
-        self.canvas.create_text(
-            width * 0.75,
-            height * 0.14,
-            text="×",
-            fill="#ffffff",
-            font=(self.font_family, 56, "bold"),
-        )
-
         question = self._current_question()
-        prompt = f"★{question['level']}　{question['question']}"
-        labels = {
-            "question": "問題を読み上げています",
-            "answer": "回答中：左右に移動して〇か×を選んでください",
-            "reveal": (
-                f"正解発表：答えは「{question['answer']}」"
-                "　|　まもなく解説へ"
-            ),
-            "explanation": f"解説：{question['explanation']}",
-            "exit": "不正解の人は3秒以内にカメラの範囲から出てください",
-        }
-        detail = labels.get(self.mode, "")
+        header_top = height * 0.025
+        header = self._panel(width * 0.025, header_top, width * 0.975, header_top + 1)
+        prompt = self.canvas.create_text(
+            width / 2, header_top + 8,
+            text=f"★{question['level']}　{question['question']}",
+            fill=WHITE, font=(self.font_family, 22, "bold"),
+            width=width * 0.86, justify="center", anchor="n",
+        )
+        prompt_bounds = self.canvas.bbox(prompt)
+        prompt_bottom = prompt_bounds[3] if prompt_bounds else height * 0.14
+        if self.extra_face_since is not None:
+            detail = "顔の検出数を確認中です。判定を一時停止しています。"
+        elif self.mode == "reveal":
+            detail = f"正解は「{question['answer']}」　解説まで"
+        elif self.mode == "exit":
+            detail = "不正解の人は3秒以内にカメラの範囲から出てください"
+        else:
+            detail = "回答中：左右に移動して〇か×を選んでください"
+        detail_id = self.canvas.create_text(
+            width / 2, prompt_bottom + 4,
+            text=detail, fill=AMBER, font=(self.font_family, 18),
+            width=width * 0.86, justify="center", anchor="n",
+        )
+        detail_bounds = self.canvas.bbox(detail_id)
+        detail_bottom = detail_bounds[3] if detail_bounds else prompt_bottom + height * 0.08
+        header_bottom = detail_bottom + 8
+        self.canvas.coords(header, width * 0.025, header_top, width * 0.975, header_bottom)
+
+        zone_top, zone_bottom = header_bottom + 8, height * 0.94
+        for left, right, color, symbol in (
+            (width * 0.025, width * 0.475, GREEN, "〇"),
+            (width * 0.525, width * 0.975, RED, "×"),
+        ):
+            self._panel(left, zone_top, right, zone_bottom, fill="", outline=color)
+            zone_width, zone_height = right - left, zone_bottom - zone_top
+            size = max(1, int(min(zone_width, zone_height) * 0.8))
+            symbol_id = self.canvas.create_text(
+                (left + right) / 2, (zone_top + zone_bottom) / 2,
+                text=symbol, fill=color, font=(self.font_family, -size, "bold"),
+            )
+            bounds = self.canvas.bbox(symbol_id)
+            if bounds:
+                ratio = min(
+                    zone_width * 0.8 / max(1, bounds[2] - bounds[0]),
+                    zone_height * 0.8 / max(1, bounds[3] - bounds[1]),
+                )
+                size = max(1, int(size * ratio))
+                self.canvas.itemconfigure(
+                    symbol_id, font=(self.font_family, -size, "bold")
+                )
+
+        self._render_faces(
+            width, height,
+            face_bounds=(width * 0.025, zone_top, width * 0.975, zone_bottom),
+        )
         display_time = (
             self.extra_face_since
             if self.extra_face_since is not None
             else time.monotonic()
         )
-        if self.mode == "answer":
-            remaining = max(
-                0, int(5 - (display_time - self.phase_started) + 0.999)
+        duration = 3 if self.mode == "exit" else 5
+        if self.mode == "answer" and self.extra_face_since is None:
+            remaining = max(0, int(duration - (display_time - self.phase_started) + 0.999))
+            size = 256
+            timer_id = self.canvas.create_text(
+                width / 2, height / 2,
+                text=str(remaining), fill=AMBER, font=(self.font_family, size, "bold"),
             )
-            detail = f"回答時間　{remaining} 秒"
-        elif self.mode == "reveal":
-            remaining = max(
-                0, int(5 - (display_time - self.phase_started) + 0.999)
-            )
-            detail = f"正解を確認しましょう　解説まで {remaining} 秒"
-        elif self.mode == "exit":
-            remaining = max(
-                0, int(3 - (display_time - self.phase_started) + 0.999)
-            )
-            detail = f"{detail}　残り {remaining} 秒"
-        if self.extra_face_since is not None:
-            detail = "顔の検出数を確認中です。判定を一時停止しています。"
-        self.canvas.create_rectangle(
-            32,
-            height * 0.27,
-            width - 32,
-            height * (0.72 if self.mode == "answer" else 0.49),
-            fill="#101827",
-            outline="#ffffff",
-            width=2,
-        )
-        self.canvas.create_text(
-            width / 2,
-            height * 0.34,
-            text=prompt,
-            fill="#ffffff",
-            font=(self.font_family, 22, "bold"),
-            width=width - 100,
-            justify="center",
-        )
-        if self.mode != "answer" or self.extra_face_since is not None:
-            self.canvas.create_text(
-                width / 2,
-                height * 0.45,
-                text=detail,
-                fill="#fef3c7",
-                font=(self.font_family, 18),
-                width=width - 100,
-                justify="center",
-            )
-        self._render_faces(width, height)
-        if self.mode == "answer":
-            if self.extra_face_since is None:
-                self.canvas.create_text(
-                    width / 2,
-                    height * 0.60,
-                    text=str(remaining),
-                    fill="#facc15",
-                    font=(self.font_family, 64, "bold"),
-                )
-            elapsed = min(5.0, display_time - self.phase_started)
-            bar_width = (width - 80) * (1 - elapsed / 5)
-            self.canvas.create_rectangle(
-                40,
-                height - 24,
-                40 + bar_width,
-                height - 12,
-                fill="#facc15",
-                outline="",
-            )
+            bounds = self.canvas.bbox(timer_id)
+            available_height = max(1, 2 * min(
+                height / 2 - header_bottom - 4, zone_bottom - height / 2
+            ))
+            while bounds and size > 12 and (
+                bounds[3] - bounds[1] > available_height
+                or bounds[2] - bounds[0] > width * 0.12
+            ):
+                size -= 4
+                self.canvas.itemconfigure(timer_id, font=(self.font_family, size, "bold"))
+                bounds = self.canvas.bbox(timer_id)
 
-    def _render_faces(self, width: int, height: int) -> None:
+        elapsed = min(duration, display_time - self.phase_started)
+        bar_width = (width - 80) * (1 - elapsed / duration)
+        self.canvas.create_rectangle(
+            40, height - 24, 40 + bar_width, height - 12, fill=AMBER, outline=""
+        )
+
+    def _render_faces(
+        self, width: int, height: int,
+        face_bounds: tuple[float, float, float, float] | None = None,
+    ) -> None:
         if self.latest_frame is None:
             return
         frame_height, frame_width = self.latest_frame.shape[:2]
@@ -1577,35 +1608,46 @@ class SecurityQuizApp:
             image.putalpha(mask)
             photo = ImageTk.PhotoImage(image)
 
-            fill = "#22c55e" if detection.center_x < 0.5 else "#ef4444"
+            fill = GREEN if detection.center_x < 0.5 else RED
             face_label = ""
             if self.mode in ("reveal", "explanation", "exit"):
                 if track_id in self.correct_ids:
-                    fill = "#22c55e"
+                    fill = GREEN
                     face_label = "正解！"
                 elif track_id in self.wrong_ids:
-                    fill = "#ef4444"
+                    fill = RED
                     face_label = "不正解"
+            center_x = detection.center_x * width
+            center_y = detection.center_y * height
+            if face_bounds is not None:
+                left, top, right, bottom = face_bounds
+                if detection.center_x < 0.5:
+                    center_x = max(left + 64, min(center_x, width * 0.39 - 64))
+                else:
+                    center_x = min(right - 64, max(center_x, width * 0.61 + 64))
+                center_y = max(
+                    top + 64, min(center_y, bottom - (100 if face_label else 64))
+                )
             self.canvas.create_oval(
-                detection.center_x * width - 64,
-                detection.center_y * height - 64,
-                detection.center_x * width + 64,
-                detection.center_y * height + 64,
+                center_x - 64,
+                center_y - 64,
+                center_x + 64,
+                center_y + 64,
                 fill=fill,
-                outline="#ffffff",
+                outline=WHITE,
                 width=5,
             )
             self.canvas.create_image(
-                detection.center_x * width,
-                detection.center_y * height,
+                center_x,
+                center_y,
                 image=photo,
             )
             if face_label:
                 self.canvas.create_text(
-                    detection.center_x * width,
-                    detection.center_y * height + 78,
+                    center_x,
+                    center_y + 78,
                     text=face_label,
-                    fill="#ffffff",
+                    fill=WHITE,
                     font=(self.font_family, 18, "bold"),
                 )
             if not hasattr(self, "_photo_refs"):

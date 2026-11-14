@@ -278,6 +278,7 @@ class GameProgressTests(unittest.TestCase):
         app.extra_face_since = None
         app.face_loss_since = None
         app.font_family = "Yu Gothic UI"
+        app.background_image = None
         app.end_message = ""
         app._return_home = Mock()
         app._continue_or_finish = Mock()
@@ -358,6 +359,58 @@ class GameProgressTests(unittest.TestCase):
         labels = [call.kwargs.get("text") for call in app.canvas.create_text.call_args_list]
         self.assertIn("参加者の顔を確認しています", labels)
         self.assertIn("6", labels)
+
+    def test_background_is_reused_until_canvas_size_changes(self):
+        app = self.make_app("home", 10)
+        app.canvas = Mock()
+        app.root = Mock()
+        app.background_image = Mock()
+        app.background_size = None
+        app.background_photo = None
+        with patch("app.ImageTk.PhotoImage") as photo:
+            app._render_background(960, 500)
+            app._render_background(960, 500)
+            app._render_background(1280, 660)
+        self.assertEqual(app.background_image.resize.call_count, 2)
+        self.assertEqual(photo.call_count, 2)
+        self.assertEqual(app.background_size, (1280, 660))
+        self.assertEqual(app.canvas.create_image.call_count, 3)
+
+    def test_f11_toggles_fullscreen_without_changing_game_mode(self):
+        app = self.make_app("answer", 10)
+        app.root = Mock()
+        app.root.attributes.side_effect = [1, None, 0, None]
+        self.assertEqual(app._toggle_fullscreen(Mock()), "break")
+        self.assertEqual(app.mode, "answer")
+        self.assertEqual(app._toggle_fullscreen(Mock()), "break")
+        self.assertEqual(
+            app.root.attributes.call_args_list,
+            [
+                unittest.mock.call("-fullscreen"),
+                unittest.mock.call("-fullscreen", False),
+                unittest.mock.call("-fullscreen"),
+                unittest.mock.call("-fullscreen", True),
+            ],
+        )
+
+    def test_home_title_and_panel_use_requested_style(self):
+        app = self.make_app("home", 10)
+        app.canvas = Mock()
+        app.canvas.winfo_width.return_value = 1280
+        app.canvas.winfo_height.return_value = 660
+        app.cancel_button = Mock()
+        app.camera_combo = Mock()
+        app.refresh_camera_button = Mock()
+        app.camera_test_button = Mock()
+        app.start_button = Mock()
+        app.setup_errors = []
+        app.camera_error = None
+        app._render()
+        title = app.canvas.create_text.call_args_list[0].kwargs
+        self.assertEqual(title["font"][1], 60)
+        self.assertEqual(title["fill"], "#F0F9FF")
+        panel = app.canvas.create_rectangle.call_args_list[0].kwargs
+        self.assertEqual((panel["fill"], panel["outline"]), ("#0B1D26", "#00E5FF"))
 
     def test_next_question_also_starts_with_intro(self):
         app = self.make_app("explanation", 10)
@@ -751,7 +804,7 @@ class GameProgressTests(unittest.TestCase):
         app.worker.set_tracked_boxes.assert_called_once_with(None)
         self.assertEqual(app.mode, "notice")
 
-    def test_win_screen_remains_for_five_seconds_then_returns_home(self):
+    def test_win_screen_remains_for_ten_seconds_then_returns_home(self):
         app = self.make_app("explanation", 10)
         app.question_index = 4
         app._continue_or_finish = SecurityQuizApp._continue_or_finish.__get__(app)
@@ -760,10 +813,10 @@ class GameProgressTests(unittest.TestCase):
             app._continue_or_finish()
         self.assertEqual(app.mode, "win")
         self.assertEqual(app.end_message, "おめでとう！全問正解！")
-        with patch("app.time.monotonic", return_value=24.9):
+        with patch("app.time.monotonic", return_value=29.9):
             app._advance_phase()
         self.assertEqual(app.mode, "win")
-        with patch("app.time.monotonic", return_value=25):
+        with patch("app.time.monotonic", return_value=30):
             app._advance_phase()
         self.assertEqual(app.mode, "home")
 
@@ -777,11 +830,18 @@ class GameProgressTests(unittest.TestCase):
         self.assertEqual(app.mode, "lose")
         self.assertEqual(app.end_message, "残念！もう一度チャレンジして")
         app._return_home.assert_not_called()
+        with patch("app.time.monotonic", return_value=17.9):
+            app._advance_phase()
+        self.assertEqual(app.mode, "lose")
+        with patch("app.time.monotonic", return_value=18):
+            app._advance_phase()
+        self.assertEqual(app.mode, "home")
 
     def test_answer_shows_large_countdown(self):
         app = self.make_app("answer", 10)
         app.sets[1][0].update({"level": 1, "question": "問題文"})
         app.canvas = Mock()
+        app.canvas.bbox.return_value = None
         app._render_faces = Mock()
         with patch("app.time.monotonic", return_value=11):
             app._render_game(1280, 760)
@@ -791,7 +851,116 @@ class GameProgressTests(unittest.TestCase):
             if call.kwargs.get("text") == "4"
         ]
         self.assertEqual(len(timer), 1)
-        self.assertGreaterEqual(timer[0]["font"][1], 60)
+        self.assertEqual(timer[0]["font"][1], 256)
+        self.assertEqual(timer[0]["fill"], "#FBBF24")
+        panels = [call.kwargs for call in app.canvas.create_rectangle.call_args_list]
+        self.assertEqual(
+            [(panel.get("fill"), panel.get("outline")) for panel in panels[:3]],
+            [("#0B1D26", "#00E5FF"), ("", "#059669"), ("", "#E11D48")],
+        )
+        header_coords = app.canvas.coords.call_args.args[1:]
+        self.assertEqual(header_coords[0], app.canvas.create_rectangle.call_args_list[1].args[0])
+        self.assertEqual(header_coords[2], app.canvas.create_rectangle.call_args_list[2].args[2])
+        for symbol, x, color in (("〇", 320, "#059669"), ("×", 960, "#E11D48")):
+            call = next(
+                call for call in app.canvas.create_text.call_args_list
+                if call.kwargs.get("text") == symbol
+            )
+            self.assertEqual(call.args[0], x)
+            self.assertEqual(call.kwargs["fill"], color)
+        timer_call = next(
+            call for call in app.canvas.create_text.call_args_list
+            if call.kwargs.get("text") == "4"
+        )
+        self.assertEqual(timer_call.args[:2], (640, 380))
+
+    def test_selection_pause_displays_warning_and_freezes_bar(self):
+        for mode in ("answer", "reveal", "exit"):
+            with self.subTest(mode=mode):
+                app = self.make_app(mode, 10)
+                app.sets[1][0].update({"level": 1, "question": "問題文"})
+                app.canvas = Mock()
+                app.canvas.bbox.return_value = None
+                app._render_faces = Mock()
+                app.extra_face_since = 11
+                with patch("app.time.monotonic", return_value=14):
+                    app._render_game(1280, 760)
+                labels = [
+                    call.kwargs.get("text")
+                    for call in app.canvas.create_text.call_args_list
+                ]
+                self.assertIn("顔の検出数を確認中です。判定を一時停止しています。", labels)
+                self.assertFalse(any(text in {"0", "1", "2", "3", "4", "5"} for text in labels))
+                bar = app.canvas.create_rectangle.call_args_list[-1]
+                duration = 3 if mode == "exit" else 5
+                self.assertAlmostEqual(
+                    bar.args[2], 40 + (1280 - 80) * (1 - 1 / duration)
+                )
+
+    def test_reveal_uses_selection_layout_and_shows_correct_answer(self):
+        app = self.make_app("reveal", 10)
+        app.sets[1][0].update({"level": 1, "question": "問題文"})
+        app.canvas = Mock()
+        app.canvas.bbox.return_value = None
+        app._render_faces = Mock()
+        with patch("app.time.monotonic", return_value=11):
+            app._render_game(1280, 760)
+        labels = [call.kwargs.get("text") for call in app.canvas.create_text.call_args_list]
+        self.assertIn("正解は「〇」　解説まで", labels)
+        self.assertFalse(any(text in {"0", "1", "2", "3", "4", "5"} for text in labels))
+        self.assertIn("〇", labels)
+        self.assertIn("×", labels)
+        panels = [call.kwargs for call in app.canvas.create_rectangle.call_args_list]
+        self.assertEqual(
+            [(panel.get("fill"), panel.get("outline")) for panel in panels[1:3]],
+            [("", "#059669"), ("", "#E11D48")],
+        )
+        bar = app.canvas.create_rectangle.call_args_list[-1]
+        self.assertAlmostEqual(bar.args[2], 40 + (1280 - 80) * 0.8)
+        app._render_faces.assert_called_once()
+
+    def test_exit_uses_selection_layout_with_three_second_gauge(self):
+        app = self.make_app("exit", 10)
+        app.sets[1][0].update({"level": 1, "question": "問題文"})
+        app.canvas = Mock()
+        app.canvas.bbox.return_value = None
+        app._render_faces = Mock()
+        for now in (10, 11, 12.9):
+            with self.subTest(now=now):
+                app.canvas.reset_mock()
+                with patch("app.time.monotonic", return_value=now):
+                    app._render_game(1280, 760)
+                labels = [
+                    call.kwargs.get("text")
+                    for call in app.canvas.create_text.call_args_list
+                ]
+                self.assertIn("不正解の人は3秒以内にカメラの範囲から出てください", labels)
+                self.assertFalse(any(text in {"0", "1", "2", "3", "4", "5"} for text in labels))
+                self.assertIn("〇", labels)
+                self.assertIn("×", labels)
+                panels = [call.kwargs for call in app.canvas.create_rectangle.call_args_list]
+                self.assertEqual(
+                    [(panel.get("fill"), panel.get("outline")) for panel in panels[1:3]],
+                    [("", "#059669"), ("", "#E11D48")],
+                )
+                bar = app.canvas.create_rectangle.call_args_list[-1]
+                self.assertAlmostEqual(
+                    bar.args[2], 40 + (1280 - 80) * (1 - (now - 10) / 3)
+                )
+
+    def test_reveal_and_exit_status_do_not_show_countdown(self):
+        for mode in ("reveal", "exit"):
+            with self.subTest(mode=mode):
+                app = self.make_app(mode, 10)
+                app.camera_error = None
+                app.worker = Mock()
+                app.worker.snapshot.return_value = (object(), [], 1, True, None)
+                with patch("app.time.monotonic", return_value=11):
+                    first = app._status_text()
+                with patch("app.time.monotonic", return_value=12):
+                    second = app._status_text()
+                self.assertEqual(first, second)
+                self.assertNotIn("残り", first)
 
     def test_reading_displays_large_question_or_explanation(self):
         app = self.make_app("question", 10)
@@ -804,6 +973,12 @@ class GameProgressTests(unittest.TestCase):
         self.assertEqual(text_calls[0]["text"], "問題")
         self.assertEqual(text_calls[1]["text"], "問題文")
         self.assertGreaterEqual(text_calls[1]["font"][1], 28)
+        self.assertEqual(text_calls[1]["fill"], "#F0F9FF")
+        self.assertEqual(app.canvas.create_rectangle.call_count, 1)
+
+        app.canvas.create_text.reset_mock()
+        app._render_reading(960, 600, "解説", "解説文")
+        self.assertEqual(app.canvas.create_text.call_args_list[1].kwargs["fill"], "#BAE6FD")
 
     def test_error_screen_is_nonmodal_and_retains_reason(self):
         app = self.make_app("answer", 10)
