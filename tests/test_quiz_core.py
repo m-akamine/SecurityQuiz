@@ -10,6 +10,7 @@ from app import (
     CameraDevice,
     CameraWorker,
     SecurityQuizApp,
+    choose_japanese_font,
     detect_faces,
     devices_from_names,
     merge_face_boxes,
@@ -225,8 +226,19 @@ class FaceTrackerTests(unittest.TestCase):
             tracker = FaceTracker([self.face(0.2)])
         with patch("quiz_core.time.monotonic", return_value=13.1):
             tracker.update([])
+        with patch("quiz_core.time.monotonic", return_value=23.1):
             with self.assertRaises(TrackingError):
                 tracker.update([self.face(0.2)])
+
+    def test_face_can_be_reassociated_after_three_but_before_ten_seconds(self):
+        with patch("quiz_core.time.monotonic", return_value=10):
+            tracker = FaceTracker([self.face(0.2)])
+        with patch("quiz_core.time.monotonic", return_value=11):
+            tracker.update([])
+        with patch("quiz_core.time.monotonic", return_value=20.9):
+            self.assertEqual(tracker.visible_ids(), set())
+            tracker.update([self.face(0.21)])
+            self.assertEqual(tracker.detected_ids(), {1})
 
     def test_normal_answer_movement_does_not_abort_tracking(self):
         tracker = FaceTracker([self.face(0.5)])
@@ -247,6 +259,7 @@ class GameProgressTests(unittest.TestCase):
             1: [
                 {
                     "answer": "〇",
+                    "question": "問題テキスト",
                     "explanation": "解説テキスト",
                 }
             ]
@@ -263,6 +276,9 @@ class GameProgressTests(unittest.TestCase):
         app.wrong_ids = {2}
         app.correct_missing_since = None
         app.extra_face_since = None
+        app.face_loss_since = None
+        app.font_family = "Yu Gothic UI"
+        app.end_message = ""
         app._return_home = Mock()
         app._continue_or_finish = Mock()
         return app
@@ -298,6 +314,160 @@ class GameProgressTests(unittest.TestCase):
             app._advance_phase()
         self.assertIsNone(app.extra_face_since)
         self.assertEqual(app.mode, "reveal")
+
+    def test_question_intro_waits_two_seconds_before_speaking_for_each_question(self):
+        app = self.make_app("answer", 10)
+        app.sets[1].append(dict(app.sets[1][0]))
+        for index in (0, 1):
+            app.question_index = index
+            app.speech.speak.reset_mock()
+            with patch("app.time.monotonic", return_value=20):
+                app._begin_question()
+            self.assertEqual(app.mode, "question_intro")
+            with patch("app.time.monotonic", return_value=21.9):
+                app._advance_phase()
+            app.speech.speak.assert_not_called()
+            with patch("app.time.monotonic", return_value=22):
+                app._advance_phase()
+            self.assertEqual(app.mode, "question")
+            app.speech.speak.assert_called_once_with("問題テキスト まるかばつか。")
+
+    def test_intro_and_recovery_screens_are_rendered(self):
+        app = self.make_app("question_intro", 10)
+        app.question_index = 1
+        app.canvas = Mock()
+        app.canvas.winfo_width.return_value = 1280
+        app.canvas.winfo_height.return_value = 760
+        app.cancel_button = Mock()
+        app.camera_combo = Mock()
+        app.refresh_camera_button = Mock()
+        app.camera_test_button = Mock()
+        app.start_button = Mock()
+        app.setup_errors = []
+        app.camera_error = None
+
+        app._render()
+        labels = [call.kwargs.get("text") for call in app.canvas.create_text.call_args_list]
+        self.assertIn("第2問", labels)
+
+        app.canvas.create_text.reset_mock()
+        app.mode = "answer"
+        app.face_loss_since = 10
+        with patch("app.time.monotonic", return_value=14):
+            app._render()
+        labels = [call.kwargs.get("text") for call in app.canvas.create_text.call_args_list]
+        self.assertIn("参加者の顔を確認しています", labels)
+        self.assertIn("6", labels)
+
+    def test_next_question_also_starts_with_intro(self):
+        app = self.make_app("explanation", 10)
+        app._continue_or_finish = SecurityQuizApp._continue_or_finish.__get__(app)
+        with patch("app.time.monotonic", return_value=20):
+            app._continue_or_finish()
+        self.assertEqual(app.question_index, 1)
+        self.assertEqual(app.mode, "question_intro")
+        self.assertEqual(app.phase_started, 20)
+
+    def test_japanese_font_selection_uses_installed_fallback(self):
+        self.assertEqual(choose_japanese_font(("Yu Gothic UI",)), "Yu Gothic UI")
+        self.assertEqual(choose_japanese_font(("Meiryo UI",)), "Meiryo UI")
+        self.assertEqual(
+            choose_japanese_font(("BIZ UDPゴシック", "Yu Gothic UI")),
+            "BIZ UDPゴシック",
+        )
+        self.assertEqual(
+            choose_japanese_font(("Yu Gothic UI", "Noto Sans JP")), "Noto Sans JP"
+        )
+
+    def test_missing_face_pauses_answer_and_recovers_before_ten_seconds(self):
+        app = self.make_app("answer", 8)
+        with patch("app.time.monotonic", return_value=10):
+            app.tracker = FaceTracker([FaceTrackerTests.face(0.2)])
+        app.latest_detections = []
+        with patch("app.time.monotonic", return_value=11):
+            app._process_new_frame()
+        self.assertEqual(app.face_loss_since, 11)
+        with patch("app.time.monotonic", return_value=20.9):
+            app._advance_phase()
+            self.assertEqual(app.mode, "answer")
+            app.latest_detections = [FaceTrackerTests.face(0.2)]
+            app._process_new_frame()
+        self.assertIsNone(app.face_loss_since)
+        self.assertAlmostEqual(app.phase_started, 17.9)
+        with patch("app.time.monotonic", return_value=22.8):
+            app._advance_phase()
+        self.assertEqual(app.mode, "answer")
+        with patch("app.time.monotonic", return_value=22.9):
+            app._advance_phase()
+        self.assertEqual(app.mode, "reveal")
+        app._return_home.assert_not_called()
+
+    def test_missing_face_times_out_even_if_face_returns_at_deadline(self):
+        for process_frame in (False, True):
+            with self.subTest(process_frame=process_frame):
+                app = self.make_app("question", 8)
+                with patch("app.time.monotonic", return_value=10):
+                    app.tracker = FaceTracker([FaceTrackerTests.face(0.2)])
+                app.latest_detections = []
+                with patch("app.time.monotonic", return_value=11):
+                    app._process_new_frame()
+                app.latest_detections = [FaceTrackerTests.face(0.2)]
+                with patch("app.time.monotonic", return_value=21):
+                    if process_frame:
+                        app._process_new_frame()
+                    else:
+                        app._advance_phase()
+                app._return_home.assert_called_once()
+                self.assertIn("再検出できません", app._return_home.call_args.args[0])
+
+    def test_missing_participant_pauses_but_wrong_players_may_leave(self):
+        app = self.make_app("answer", 8)
+        with patch("app.time.monotonic", return_value=10):
+            app.tracker = FaceTracker([
+                FaceTrackerTests.face(0.2), FaceTrackerTests.face(0.8)
+            ])
+        app.latest_detections = [FaceTrackerTests.face(0.2)]
+        with patch("app.time.monotonic", return_value=11):
+            app._process_new_frame()
+        self.assertEqual(app.face_loss_since, 11)
+
+        app.mode = "exit"
+        app.face_loss_since = None
+        with patch("app.time.monotonic", return_value=12):
+            app._process_new_frame()
+        self.assertIsNone(app.face_loss_since)
+
+    def test_overlapping_extra_face_and_missing_face_pause_only_once(self):
+        app = self.make_app("answer", 6)
+        with patch("app.time.monotonic", return_value=10):
+            app.tracker = FaceTracker([FaceTrackerTests.face(0.2)])
+        app.latest_detections = []
+        with patch("app.time.monotonic", return_value=11):
+            app._process_new_frame()
+        app.latest_detections = [
+            FaceTrackerTests.face(0.2), FaceTrackerTests.face(0.8)
+        ]
+        with patch("app.time.monotonic", return_value=12):
+            app._process_new_frame()
+        app.latest_detections = [FaceTrackerTests.face(0.2)]
+        with patch("app.time.monotonic", return_value=13):
+            app._process_new_frame()
+        self.assertEqual(app.phase_started, 8)
+        self.assertIsNone(app.face_loss_since)
+        self.assertIsNone(app.extra_face_since)
+
+    def test_unsafe_reassociation_still_stops_game(self):
+        app = self.make_app("question", 8)
+        with patch("app.time.monotonic", return_value=10):
+            app.tracker = FaceTracker([FaceTrackerTests.face(0.2)])
+        app.latest_detections = []
+        with patch("app.time.monotonic", return_value=11):
+            app._process_new_frame()
+        app.latest_detections = [FaceTrackerTests.face(0.8)]
+        with patch("app.time.monotonic", return_value=15):
+            app._process_new_frame()
+        app._return_home.assert_called_once()
+        self.assertIn("追跡", app._return_home.call_args.args[0])
 
     def test_persistent_extra_face_stops_game_without_judging(self):
         app = self.make_app("answer", 6)
@@ -425,9 +595,13 @@ class GameProgressTests(unittest.TestCase):
         app = SecurityQuizApp.__new__(SecurityQuizApp)
         app.mode = "countdown"
         app.extra_face_since = None
+        app.face_loss_since = None
+        app.font_family = "Yu Gothic UI"
         app.phase_started = 10
-        app.countdown_last_face_seen_at = 15 if detections else 10
+        app.countdown_last_face_seen_at = 20 if detections else 10
         app.home_message = ""
+        app.setup_errors = []
+        app.camera_error = None
         app.latest_detections = detections
         app.speech = Mock()
         app.tracker = None
@@ -466,10 +640,31 @@ class GameProgressTests(unittest.TestCase):
 
         self.assertEqual(app.mode, "home")
 
-    def test_countdown_expiry_starts_only_after_five_seconds(self):
+    def test_home_does_not_start_when_setup_has_errors(self):
+        app = self.make_countdown_app([FaceTrackerTests.face(0.5)])
+        app.mode = "home"
+        app.setup_errors = ["音声が利用できません"]
+
+        app._process_new_frame()
+
+        self.assertEqual(app.mode, "home")
+
+    def test_home_countdown_displays_ten_seconds(self):
+        app = self.make_countdown_app([FaceTrackerTests.face(0.5)])
+        app.canvas = Mock()
+        app._render_faces = Mock()
+
+        with patch("app.time.monotonic", return_value=10):
+            app._render_home_wait(1280, 760)
+
+        labels = [call.kwargs.get("text") for call in app.canvas.create_text.call_args_list]
+        self.assertIn("10", labels)
+        self.assertIn("セキュリティ〇×クイズ", labels)
+
+    def test_countdown_expiry_starts_only_after_ten_seconds(self):
         app = self.make_countdown_app([FaceTrackerTests.face(0.5)])
 
-        with patch("app.time.monotonic", return_value=14.9):
+        with patch("app.time.monotonic", return_value=19.9):
             app._advance_phase()
 
         self.assertEqual(app.mode, "countdown")
@@ -491,19 +686,20 @@ class GameProgressTests(unittest.TestCase):
     def test_countdown_waits_for_face_to_reappear_within_grace(self):
         app = self.make_countdown_app([])
         app.phase_started = 5
+        app.countdown_last_face_seen_at = 15
 
-        with patch("app.time.monotonic", return_value=10.5):
+        with patch("app.time.monotonic", return_value=15.5):
             app._process_new_frame()
             app._advance_phase()
 
         self.assertEqual(app.mode, "countdown")
 
         app.latest_detections = [FaceTrackerTests.face(0.5)]
-        with patch("app.time.monotonic", return_value=10.6):
+        with patch("app.time.monotonic", return_value=15.6):
             app._process_new_frame()
             app._advance_phase()
 
-        self.assertEqual(app.mode, "question")
+        self.assertEqual(app.mode, "question_intro")
 
     def test_countdown_rejects_more_than_five_faces(self):
         app = self.make_countdown_app(
@@ -519,11 +715,11 @@ class GameProgressTests(unittest.TestCase):
         app = self.make_countdown_app([FaceTrackerTests.face(0.3)])
         app.worker = Mock()
 
-        with patch("app.time.monotonic", return_value=15):
+        with patch("app.time.monotonic", return_value=20):
             app._advance_phase()
             self.assertEqual(app.tracker.visible_ids(), {1})
 
-        self.assertEqual(app.mode, "question")
+        self.assertEqual(app.mode, "question_intro")
         self.assertEqual(app.current_set_id, 3)
         self.assertEqual(app.next_set_id, 4)
         self.assertEqual(app.question_index, 0)
@@ -553,7 +749,76 @@ class GameProgressTests(unittest.TestCase):
         app._return_home("終了")
 
         app.worker.set_tracked_boxes.assert_called_once_with(None)
+        self.assertEqual(app.mode, "notice")
+
+    def test_win_screen_remains_for_five_seconds_then_returns_home(self):
+        app = self.make_app("explanation", 10)
+        app.question_index = 4
+        app._continue_or_finish = SecurityQuizApp._continue_or_finish.__get__(app)
+
+        with patch("app.time.monotonic", return_value=20):
+            app._continue_or_finish()
+        self.assertEqual(app.mode, "win")
+        self.assertEqual(app.end_message, "おめでとう！全問正解！")
+        with patch("app.time.monotonic", return_value=24.9):
+            app._advance_phase()
+        self.assertEqual(app.mode, "win")
+        with patch("app.time.monotonic", return_value=25):
+            app._advance_phase()
         self.assertEqual(app.mode, "home")
+
+    def test_all_wrong_after_exit_shows_retry_screen(self):
+        app = self.make_app("exit", 10)
+        app.correct_ids = set()
+
+        with patch("app.time.monotonic", return_value=13):
+            app._advance_phase()
+
+        self.assertEqual(app.mode, "lose")
+        self.assertEqual(app.end_message, "残念！もう一度チャレンジして")
+        app._return_home.assert_not_called()
+
+    def test_answer_shows_large_countdown(self):
+        app = self.make_app("answer", 10)
+        app.sets[1][0].update({"level": 1, "question": "問題文"})
+        app.canvas = Mock()
+        app._render_faces = Mock()
+        with patch("app.time.monotonic", return_value=11):
+            app._render_game(1280, 760)
+
+        timer = [
+            call.kwargs for call in app.canvas.create_text.call_args_list
+            if call.kwargs.get("text") == "4"
+        ]
+        self.assertEqual(len(timer), 1)
+        self.assertGreaterEqual(timer[0]["font"][1], 60)
+
+    def test_reading_displays_large_question_or_explanation(self):
+        app = self.make_app("question", 10)
+        app.canvas = Mock()
+        app.canvas.bbox.return_value = (100, 100, 800, 250)
+
+        app._render_reading(960, 600, "問題", "問題文")
+
+        text_calls = [call.kwargs for call in app.canvas.create_text.call_args_list]
+        self.assertEqual(text_calls[0]["text"], "問題")
+        self.assertEqual(text_calls[1]["text"], "問題文")
+        self.assertGreaterEqual(text_calls[1]["font"][1], 28)
+
+    def test_error_screen_is_nonmodal_and_retains_reason(self):
+        app = self.make_app("answer", 10)
+        app.root = Mock()
+        app._return_home = SecurityQuizApp._return_home.__get__(app)
+
+        with patch("app.time.monotonic", return_value=20):
+            app._return_home("カメラエラー")
+        self.assertEqual(app.mode, "notice")
+        self.assertEqual(app.end_message, "カメラエラー")
+        app.root.after_idle.assert_not_called()
+        with patch("app.time.monotonic", return_value=25):
+            app._advance_phase()
+        self.assertEqual(app.mode, "home")
+        self.assertEqual(app.home_message, "カメラエラー")
 
     def test_countdown_expiry_without_faces_returns_home_and_keeps_same_set(self):
         app = self.make_countdown_app([])

@@ -15,7 +15,7 @@ import tkinter as tk
 from dataclasses import dataclass
 from importlib import import_module
 from pathlib import Path
-from tkinter import messagebox, ttk
+from tkinter import font as tkfont, messagebox, ttk
 from typing import Any
 
 try:
@@ -40,9 +40,20 @@ from quiz_core import (
 
 APP_TITLE = "セキュリティ〇×クイズ"
 QUESTION_FILE = Path(__file__).with_name("261113セキュリティクイズ問題.json")
+START_COUNTDOWN_SECONDS = 10
+RESULT_SCREEN_SECONDS = 5
+QUESTION_INTRO_SECONDS = 2
+FACE_RECOVERY_SECONDS = 10
 COUNTDOWN_FACE_LOSS_GRACE_SECONDS = 2.0
 ANSWER_FACE_RETRY_SECONDS = 2.0
 EXTRA_FACE_RETRY_SECONDS = 2.0
+FONT_CANDIDATES = (
+    "Noto Sans JP", "BIZ UDPゴシック", "BIZ UDPGothic", "Yu Gothic UI", "Meiryo UI"
+)
+
+
+def choose_japanese_font(available: tuple[str, ...]) -> str:
+    return next((name for name in FONT_CANDIDATES if name in available), "Yu Gothic UI")
 
 
 class CameraEnumerationError(RuntimeError):
@@ -415,6 +426,7 @@ class CameraWorker:
 class SecurityQuizApp:
     def __init__(self, root: tk.Tk, camera_index: int) -> None:
         self.root = root
+        self.font_family = choose_japanese_font(tkfont.families(root))
         self.camera_index = camera_index
         self.root.title(APP_TITLE)
         self.root.geometry("1280x760")
@@ -482,7 +494,7 @@ class SecurityQuizApp:
         self.status_label = tk.Label(
             root,
             textvariable=self.status_var,
-            font=("Yu Gothic UI", 13),
+            font=(self.font_family, 13),
             fg="#ffffff",
             bg="#101827",
             anchor="w",
@@ -531,7 +543,7 @@ class SecurityQuizApp:
 
         self.mode = "home"
         self.home_message = ""
-        self.home_message = ""
+        self.end_message = ""
         self.next_set_id = 1
         self.current_set_id = 1
         self.question_index = 0
@@ -545,6 +557,7 @@ class SecurityQuizApp:
         self.wrong_ids: set[int] = set()
         self.correct_missing_since: float | None = None
         self.extra_face_since: float | None = None
+        self.face_loss_since: float | None = None
 
         self.canvas.bind("<Configure>", lambda _event: self._render())
         self._update()
@@ -597,17 +610,15 @@ class SecurityQuizApp:
         try:
             devices = enumerate_camera_devices()
         except CameraEnumerationError as error:
-            messagebox.showerror("カメラ一覧", str(error), parent=self.root)
+            self._return_home(f"カメラ一覧: {error}")
             return
 
         if not devices:
             if self.worker is not None:
                 if not self.worker.stop():
-                    messagebox.showerror(
-                        "カメラ一覧",
+                    self._return_home(
                         "現在のカメラを解放できませんでした。"
-                        "ほかのアプリで使用中でないか確認してください。",
-                        parent=self.root,
+                        "ほかのアプリで使用中でないか確認してください。"
                     )
                     return
                 self.worker = None
@@ -647,11 +658,9 @@ class SecurityQuizApp:
         ):
             return
         if self.worker is not None and not self.worker.stop():
-            messagebox.showerror(
-                "カメラ切替",
+            self._return_home(
                 "現在のカメラを解放できませんでした。"
-                "ほかのアプリで使用中でないか確認してください。",
-                parent=self.root,
+                "ほかのアプリで使用中でないか確認してください。"
             )
             if current_device is not None:
                 self.camera_var.set(current_device.label)
@@ -684,18 +693,12 @@ class SecurityQuizApp:
         if self.mode != "home":
             return
         if self.worker is None or self.camera_error:
-            messagebox.showerror(
-                "カメラを確認できません",
-                self.camera_error or "カメラを利用できません。",
-                parent=self.root,
-            )
+            self._return_home(self.camera_error or "カメラを利用できません。")
             return
         frame, _faces, _sequence, ready, error = self.worker.snapshot()
         if not ready or frame is None:
-            messagebox.showerror(
-                "カメラを確認できません",
+            self._return_home(
                 error or "カメラの準備ができていません。少し待ってから再試行してください。",
-                parent=self.root,
             )
             return
         self.mode = "camera_test"
@@ -715,23 +718,15 @@ class SecurityQuizApp:
         if self.mode != "home":
             return
         if self.setup_errors:
-            messagebox.showerror(
-                "開始できません", "\n".join(self.setup_errors), parent=self.root
-            )
+            self._return_home("\n".join(self.setup_errors))
             return
         if self.worker is None or self.camera_error:
-            messagebox.showerror(
-                "開始できません",
-                self.camera_error or "カメラを利用できません。",
-                parent=self.root,
-            )
+            self._return_home(self.camera_error or "カメラを利用できません。")
             return
         frame, _faces, _sequence, ready, error = self.worker.snapshot()
         if not ready or frame is None:
-            messagebox.showerror(
-                "開始できません",
+            self._return_home(
                 error or "カメラの準備ができていません。少し待ってから再試行してください。",
-                parent=self.root,
             )
             return
         self.mode = "waiting_for_players"
@@ -758,11 +753,15 @@ class SecurityQuizApp:
 
         if self.mode in (
             "question",
+            "question_intro",
             "answer",
             "reveal",
             "explanation",
             "exit",
             "countdown",
+            "notice",
+            "win",
+            "lose",
         ):
             self._advance_phase()
 
@@ -794,6 +793,8 @@ class SecurityQuizApp:
             return
 
         if self.mode == "home":
+            if self.setup_errors or self.camera_error:
+                return
             if 1 <= len(self.latest_detections) <= 5:
                 self._start_countdown()
             elif len(self.latest_detections) > 5:
@@ -811,6 +812,12 @@ class SecurityQuizApp:
         if self.tracker is None:
             return
         now = time.monotonic()
+        if (
+            self.face_loss_since is not None
+            and now - self.face_loss_since >= FACE_RECOVERY_SECONDS
+        ):
+            self._return_home("顔を再検出できませんでした。ゲームを終了します。")
+            return
         if (
             self.extra_face_since is not None
             and now - self.extra_face_since >= EXTRA_FACE_RETRY_SECONDS
@@ -833,11 +840,28 @@ class SecurityQuizApp:
             return
         if self.extra_face_since is not None:
             paused = now - self.extra_face_since
+            if self.face_loss_since is None:
+                self.phase_started += paused
+                if self.correct_missing_since is not None:
+                    self.correct_missing_since += paused
+            self.extra_face_since = None
+        self._sync_tracking_regions()
+        if self.mode in ("question_intro", "question", "answer"):
+            required_ids = set(self.tracker.tracks)
+        elif self.mode in ("reveal", "explanation", "exit"):
+            required_ids = self.correct_ids
+        else:
+            required_ids = set()
+        if required_ids - self.tracker.detected_ids():
+            if self.face_loss_since is None:
+                self.face_loss_since = now
+            return
+        if self.face_loss_since is not None:
+            paused = now - self.face_loss_since
             self.phase_started += paused
             if self.correct_missing_since is not None:
                 self.correct_missing_since += paused
-            self.extra_face_since = None
-        self._sync_tracking_regions()
+            self.face_loss_since = None
         if self.mode in ("explanation", "exit") and self.correct_ids:
             self._check_correct_presence()
 
@@ -860,21 +884,28 @@ class SecurityQuizApp:
         if self.tracker is None:
             self._return_home("参加者を追跡できません。")
             return
-        self.mode = "question"
+        self.mode = "question_intro"
         self.phase_started = time.monotonic()
-        question = self._current_question()
-        try:
-            self.speech.speak(question["question"])
-        except (RuntimeError, OSError, subprocess.SubprocessError) as error:
-            self._return_home(str(error))
 
     def _advance_phase(self) -> None:
         now = time.monotonic()
+        if self.mode in ("notice", "win", "lose"):
+            if now - self.phase_started >= RESULT_SCREEN_SECONDS:
+                self.home_message = self.end_message if self.mode == "notice" else ""
+                self.mode = "home"
+            return
         try:
             self.speech.check()
         except RuntimeError as error:
             self._return_home(str(error))
             return
+
+        if self.face_loss_since is not None:
+            if now - self.face_loss_since >= FACE_RECOVERY_SECONDS:
+                self._return_home("顔を再検出できませんでした。ゲームを終了します。")
+                return
+            if self.extra_face_since is None:
+                return
 
         if self.extra_face_since is not None:
             if now - self.extra_face_since >= EXTRA_FACE_RETRY_SECONDS:
@@ -894,7 +925,7 @@ class SecurityQuizApp:
                     "顔が検出されず、カウントダウンを中止しました。"
                 )
                 return
-            if now - self.phase_started >= 5:
+            if now - self.phase_started >= START_COUNTDOWN_SECONDS:
                 if not 1 <= len(self.latest_detections) <= 5:
                     return
                 try:
@@ -907,8 +938,18 @@ class SecurityQuizApp:
                 self.current_set_id = self.next_set_id
                 self.next_set_id = self.next_set_id % 5 + 1
                 self.question_index = 0
-                self.mode = "question"
+                self.mode = "question_intro"
                 self._begin_question()
+
+        elif self.mode == "question_intro":
+            if now - self.phase_started >= QUESTION_INTRO_SECONDS:
+                self.mode = "question"
+                self.phase_started = now
+                question = self._current_question()
+                try:
+                    self.speech.speak(f"{question['question']} まるかばつか。")
+                except (RuntimeError, OSError, subprocess.SubprocessError) as error:
+                    self._return_home(str(error))
 
         elif self.mode == "question":
             if (
@@ -953,7 +994,7 @@ class SecurityQuizApp:
         elif self.mode == "explanation":
             if self.correct_ids:
                 self._check_correct_presence()
-                if self.mode == "home":
+                if self.mode != "explanation":
                     return
             if (
                 now - self.phase_started >= 5
@@ -967,7 +1008,7 @@ class SecurityQuizApp:
 
         elif self.mode == "exit" and now - self.phase_started >= 3:
             if not self.correct_ids:
-                self._return_home("全員不正解です。解説が終了しました。")
+                self._show_end_screen("lose", "残念！もう一度チャレンジして")
                 return
             visible = self.tracker.visible_ids() if self.tracker else set()
             remaining_wrong = visible & self.wrong_ids
@@ -1004,10 +1045,10 @@ class SecurityQuizApp:
 
     def _continue_or_finish(self) -> None:
         if not self.correct_ids:
-            self._return_home("全員不正解です。ゲームを終了します。")
+            self._show_end_screen("lose", "残念！もう一度チャレンジして")
             return
         if self.question_index >= 4:
-            self._return_home("ゲームクリア！全問正解です。")
+            self._show_end_screen("win", "おめでとう！全問正解！")
             return
         self.question_index += 1
         self._begin_question()
@@ -1016,6 +1057,8 @@ class SecurityQuizApp:
         return self.sets[self.current_set_id][self.question_index]
 
     def _status_text(self) -> str:
+        if self.mode in ("notice", "win", "lose"):
+            return self.end_message
         if self.camera_error:
             return f"カメラエラー: {self.camera_error}"
         if self.worker is None:
@@ -1025,6 +1068,14 @@ class SecurityQuizApp:
             return f"カメラエラー: {error}"
         if not ready:
             return "カメラを確認しています…"
+        if self.face_loss_since is not None:
+            remaining = max(
+                0,
+                math.ceil(
+                    FACE_RECOVERY_SECONDS - (time.monotonic() - self.face_loss_since)
+                ),
+            )
+            return f"参加者の顔を再確認中（残り{remaining}秒）"
         if self.extra_face_since is not None:
             return "顔の検出数を確認中です。判定を一時停止しています。"
         if self.mode == "home":
@@ -1046,7 +1097,9 @@ class SecurityQuizApp:
                 or "参加者の顔を確認しています。カメラの前に1〜5人でお進みください。"
             )
         if self.mode == "countdown":
-            remaining = max(0.0, 5 - (time.monotonic() - self.phase_started))
+            remaining = max(
+                0.0, START_COUNTDOWN_SECONDS - (time.monotonic() - self.phase_started)
+            )
             if remaining == 0 and not self.latest_detections:
                 return (
                     "参加者の顔を確認中（再検出まで最大2秒）"
@@ -1093,40 +1146,42 @@ class SecurityQuizApp:
         self.canvas.delete("all")
         width = max(self.canvas.winfo_width(), 1)
         height = max(self.canvas.winfo_height(), 1)
-        if self.mode == "home":
+        if self.face_loss_since is not None:
+            self._render_face_recovery(width, height, self.face_loss_since)
+        elif self.mode == "home":
             self.canvas.configure(bg="#101827")
             self.canvas.create_text(
                 width / 2,
                 height * 0.20,
                 text=APP_TITLE,
                 fill="#ffffff",
-                font=("Yu Gothic UI", 40, "bold"),
+                font=(self.font_family, 40, "bold"),
             )
             self.canvas.create_text(
                 width / 2,
                 height * 0.37,
                 text="カメラの前で左右に移動して〇×に答えよう！",
                 fill="#dbeafe",
-                font=("Yu Gothic UI", 24),
+                font=(self.font_family, 24),
             )
             self.canvas.create_text(
                 width / 2,
                 height * 0.48,
                 text="〇  左へ移動                 ×  右へ移動",
                 fill="#ffffff",
-                font=("Yu Gothic UI", 26, "bold"),
+                font=(self.font_family, 26, "bold"),
             )
             self.canvas.create_text(
                 width / 2,
                 height * 0.63,
                 text=(
-                    "ホーム画面で顔を1〜5人認識すると、自動で5秒カウントダウン後に出題します。\n"
+                    "ホーム画面で顔を1〜5人認識すると、自動で10秒カウントダウン後に出題します。\n"
                     "カウントダウン中に顔を認識できなくなると、カウントダウン前のホーム画面に戻ります。\n"
                     "顔位置を画面に表示するためだけに使い、顔認証・本人特定はしません。\n"
                     "カメラ映像・画像は保存せず、外部へ送信しません。"
                 ),
                 fill="#bfdbfe",
-                font=("Yu Gothic UI", 17),
+                font=(self.font_family, 17),
                 justify="center",
             )
             if self.setup_errors or self.camera_error:
@@ -1135,12 +1190,31 @@ class SecurityQuizApp:
                     height * 0.83,
                     text="開始できません。下のスタッフ向け表示を確認してください。",
                     fill="#fecaca",
-                    font=("Yu Gothic UI", 16, "bold"),
+                    font=(self.font_family, 16, "bold"),
                 )
         elif self.mode == "camera_test":
             self._render_camera_test(width, height)
         elif self.mode in ("waiting_for_players", "countdown"):
             self._render_home_wait(width, height)
+        elif self.mode in ("win", "lose", "notice"):
+            self._render_end_screen(width, height)
+        elif self.mode == "question_intro":
+            self.canvas.configure(bg="#101827")
+            self.canvas.create_text(
+                width / 2,
+                height / 2,
+                text=f"第{self.question_index + 1}問",
+                fill="#ffffff",
+                font=(self.font_family, 72, "bold"),
+            )
+        elif self.mode in ("question", "explanation"):
+            question = self._current_question()
+            self._render_reading(
+                width,
+                height,
+                "問題" if self.mode == "question" else "解説",
+                question["question"] if self.mode == "question" else question["explanation"],
+            )
         else:
             self._render_game(width, height)
 
@@ -1187,16 +1261,97 @@ class SecurityQuizApp:
             state="normal" if can_start else "disabled",
         )
 
+    def _render_face_recovery(
+        self, width: int, height: int, loss_started: float
+    ) -> None:
+        remaining = max(
+            0, math.ceil(FACE_RECOVERY_SECONDS - (time.monotonic() - loss_started))
+        )
+        self.canvas.configure(bg="#101827")
+        self.canvas.create_text(
+            width / 2, height * 0.3,
+            text="参加者の顔を確認しています",
+            fill="#ffffff", font=(self.font_family, 36, "bold"),
+        )
+        self.canvas.create_text(
+            width / 2, height * 0.5,
+            text=str(remaining),
+            fill="#facc15", font=(self.font_family, 72, "bold"),
+        )
+        self.canvas.create_text(
+            width / 2, height * 0.7,
+            text="カメラの方を向いてお待ちください",
+            fill="#dbeafe", font=(self.font_family, 24),
+        )
+
+    def _render_reading(
+        self, width: int, height: int, title: str, text: str
+    ) -> None:
+        self.canvas.configure(bg="#101827")
+        self.canvas.create_text(
+            width / 2,
+            height * 0.13,
+            text=title,
+            fill="#facc15",
+            font=(self.font_family, 40, "bold"),
+        )
+        self.canvas.create_rectangle(
+            32, height * 0.22, width - 32, height * 0.88,
+            fill="#1e293b", outline="#93c5fd", width=3,
+        )
+        size = min(52, max(28, int(width / 25)))
+        text_id = self.canvas.create_text(
+            width / 2,
+            height * 0.55,
+            text=text,
+            fill="#ffffff",
+            font=(self.font_family, size, "bold"),
+            width=width - 100,
+            justify="center",
+        )
+        bounds = self.canvas.bbox(text_id)
+        while bounds and bounds[3] - bounds[1] > height * 0.60 and size > 20:
+            size -= 2
+            self.canvas.itemconfigure(text_id, font=(self.font_family, size, "bold"))
+            bounds = self.canvas.bbox(text_id)
+
+    def _render_end_screen(self, width: int, height: int) -> None:
+        colors = {"win": "#14532d", "lose": "#78350f", "notice": "#1e293b"}
+        self.canvas.configure(bg=colors[self.mode])
+        self.canvas.create_text(
+            width / 2,
+            height * 0.46,
+            text=self.end_message,
+            fill="#ffffff",
+            font=(self.font_family, 44 if self.mode != "notice" else 30, "bold"),
+            width=width - 100,
+            justify="center",
+        )
+        self.canvas.create_text(
+            width / 2,
+            height * 0.75,
+            text="まもなくホーム画面に戻ります",
+            fill="#e2e8f0",
+            font=(self.font_family, 20),
+        )
+
     def _render_home_wait(self, width: int, height: int) -> None:
         self.canvas.configure(bg="#101827")
+        self.canvas.create_text(
+            width / 2,
+            height * 0.10,
+            text=APP_TITLE,
+            fill="#ffffff",
+            font=(self.font_family, 26, "bold"),
+        )
         if self.mode == "waiting_for_players":
             message = self.home_message or "参加者の顔を確認しています。"
             detail = "1〜5人でカメラの前にお進みください"
         else:
             remaining = max(
-                1, int(5 - (time.monotonic() - self.phase_started) + 0.999)
+                1, int(START_COUNTDOWN_SECONDS - (time.monotonic() - self.phase_started) + 0.999)
             )
-            if time.monotonic() - self.phase_started >= 5 and not self.latest_detections:
+            if time.monotonic() - self.phase_started >= START_COUNTDOWN_SECONDS and not self.latest_detections:
                 message = "顔を確認中…"
                 detail = "再検出されるとゲームを開始します"
             else:
@@ -1207,14 +1362,14 @@ class SecurityQuizApp:
             height * 0.30,
             text=detail,
             fill="#ffffff",
-            font=("Yu Gothic UI", 30, "bold"),
+            font=(self.font_family, 30, "bold"),
         )
         self.canvas.create_text(
             width / 2,
             height * 0.50,
             text=message,
             fill="#facc15" if self.mode == "countdown" else "#dbeafe",
-            font=("Yu Gothic UI", 64 if self.mode == "countdown" else 30, "bold"),
+            font=(self.font_family, 64 if self.mode == "countdown" else 30, "bold"),
             width=width - 100,
             justify="center",
         )
@@ -1223,7 +1378,7 @@ class SecurityQuizApp:
             height * 0.70,
             text=f"検出中の顔: {len(self.latest_detections)}人",
             fill="#ffffff",
-            font=("Yu Gothic UI", 22),
+            font=(self.font_family, 22),
         )
         self._render_faces(width, height)
 
@@ -1244,7 +1399,7 @@ class SecurityQuizApp:
                 "左右反転  |  映像は保存・送信されません  |  Escで戻る"
             ),
             fill="#ffffff",
-            font=("Yu Gothic UI", 18, "bold"),
+            font=(self.font_family, 18, "bold"),
         )
         if self.latest_frame is None:
             self.canvas.create_text(
@@ -1252,7 +1407,7 @@ class SecurityQuizApp:
                 height / 2,
                 text="カメラ映像を待っています…",
                 fill="#ffffff",
-                font=("Yu Gothic UI", 24),
+                font=(self.font_family, 24),
             )
             return
 
@@ -1297,14 +1452,14 @@ class SecurityQuizApp:
             height * 0.14,
             text="〇",
             fill="#ffffff",
-            font=("Yu Gothic UI", 56, "bold"),
+            font=(self.font_family, 56, "bold"),
         )
         self.canvas.create_text(
             width * 0.75,
             height * 0.14,
             text="×",
             fill="#ffffff",
-            font=("Yu Gothic UI", 56, "bold"),
+            font=(self.font_family, 56, "bold"),
         )
 
         question = self._current_question()
@@ -1346,7 +1501,7 @@ class SecurityQuizApp:
             32,
             height * 0.27,
             width - 32,
-            height * 0.49,
+            height * (0.72 if self.mode == "answer" else 0.49),
             fill="#101827",
             outline="#ffffff",
             width=2,
@@ -1356,21 +1511,30 @@ class SecurityQuizApp:
             height * 0.34,
             text=prompt,
             fill="#ffffff",
-            font=("Yu Gothic UI", 22, "bold"),
+            font=(self.font_family, 22, "bold"),
             width=width - 100,
             justify="center",
         )
-        self.canvas.create_text(
-            width / 2,
-            height * 0.45,
-            text=detail,
-            fill="#fef3c7",
-            font=("Yu Gothic UI", 18),
-            width=width - 100,
-            justify="center",
-        )
+        if self.mode != "answer" or self.extra_face_since is not None:
+            self.canvas.create_text(
+                width / 2,
+                height * 0.45,
+                text=detail,
+                fill="#fef3c7",
+                font=(self.font_family, 18),
+                width=width - 100,
+                justify="center",
+            )
         self._render_faces(width, height)
         if self.mode == "answer":
+            if self.extra_face_since is None:
+                self.canvas.create_text(
+                    width / 2,
+                    height * 0.60,
+                    text=str(remaining),
+                    fill="#facc15",
+                    font=(self.font_family, 64, "bold"),
+                )
             elapsed = min(5.0, display_time - self.phase_started)
             bar_width = (width - 80) * (1 - elapsed / 5)
             self.canvas.create_rectangle(
@@ -1442,7 +1606,7 @@ class SecurityQuizApp:
                     detection.center_y * height + 78,
                     text=face_label,
                     fill="#ffffff",
-                    font=("Yu Gothic UI", 18, "bold"),
+                    font=(self.font_family, 18, "bold"),
                 )
             if not hasattr(self, "_photo_refs"):
                 self._photo_refs = []
@@ -1450,7 +1614,12 @@ class SecurityQuizApp:
         self._photo_refs = self._photo_refs[-5:]
 
     def _return_home(self, message: str) -> None:
-        self.mode = "home"
+        self._show_end_screen("notice", message)
+
+    def _show_end_screen(self, mode: str, message: str) -> None:
+        self.mode = mode
+        self.phase_started = time.monotonic()
+        self.end_message = message
         self.tracker = None
         self._sync_tracking_regions()
         self.home_message = ""
@@ -1458,21 +1627,18 @@ class SecurityQuizApp:
         self.wrong_ids.clear()
         self.correct_missing_since = None
         self.extra_face_since = None
+        self.face_loss_since = None
         if self.speech is not None:
             self.speech.stop()
-        self.root.after_idle(
-            lambda: messagebox.showinfo("ゲーム終了", message, parent=self.root)
-        )
 
     def close(self) -> None:
         if self.speech is not None:
             self.speech.stop()
         if self.worker is not None and not self.worker.stop():
-            messagebox.showwarning(
-                "カメラ",
-                "カメラの終了処理に時間がかかっています。アプリを閉じます。",
-                parent=self.root,
+            self._return_home(
+                "カメラを解放できませんでした。もう一度終了してください。"
             )
+            return
         self.root.destroy()
 
 

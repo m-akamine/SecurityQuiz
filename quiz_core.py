@@ -36,6 +36,7 @@ class TrackedFace:
     detection: Detection
     visible: bool = True
     last_seen_at: float = 0.0
+    missing_since: float | None = None
     lost: bool = False
 
 
@@ -111,6 +112,7 @@ class FaceTracker:
     MAX_STEP = 0.35
     AMBIGUITY_MARGIN = 0.015
     MISSED_SECONDS_GRACE = 3.0
+    MAX_MISSED_SECONDS = 10.0
 
     def __init__(self, initial_detections: list[Detection]) -> None:
         if not 1 <= len(initial_detections) <= 5:
@@ -129,7 +131,12 @@ class FaceTracker:
 
         track_ids = list(self.tracks)
         for track in self.tracks.values():
-            if now - track.last_seen_at > self.MISSED_SECONDS_GRACE:
+            missing_start = (
+                track.missing_since
+                if track.missing_since is not None
+                else track.last_seen_at
+            )
+            if now - missing_start >= self.MAX_MISSED_SECONDS:
                 track.lost = True
         assignments: list[tuple[float, tuple[int, ...], tuple[int, ...]]] = []
         for chosen_tracks in itertools.combinations(track_ids, len(detections)):
@@ -152,6 +159,8 @@ class FaceTracker:
         if not assignments:
             for track in self.tracks.values():
                 track.visible = False
+                if track.missing_since is None:
+                    track.missing_since = now
             return
 
         assignments.sort(key=lambda item: item[0])
@@ -182,10 +191,13 @@ class FaceTracker:
             detection = assigned_detections.get(track_id)
             if detection is None:
                 track.visible = False
+                if track.missing_since is None:
+                    track.missing_since = now
             else:
                 track.detection = detection
                 track.visible = True
                 track.last_seen_at = now
+                track.missing_since = None
 
     def visible_ids(self) -> set[int]:
         now = time.monotonic()
