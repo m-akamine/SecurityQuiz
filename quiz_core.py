@@ -5,6 +5,7 @@ from __future__ import annotations
 import itertools
 import json
 import math
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -16,6 +17,10 @@ class QuestionDataError(ValueError):
 
 class TrackingError(ValueError):
     """Raised when face positions cannot be associated safely."""
+
+
+class ExtraFacesError(TrackingError):
+    """Raised when more faces are detected than the registered participants."""
 
 
 @dataclass(frozen=True)
@@ -30,7 +35,7 @@ class TrackedFace:
     track_id: int
     detection: Detection
     visible: bool = True
-    missed_frames: int = 0
+    last_seen_at: float = 0.0
     lost: bool = False
 
 
@@ -105,23 +110,27 @@ class FaceTracker:
 
     MAX_STEP = 0.35
     AMBIGUITY_MARGIN = 0.015
-    MISSED_FRAME_GRACE = 30
-    MAX_MISSED_FRAMES = 30
+    MISSED_SECONDS_GRACE = 3.0
 
     def __init__(self, initial_detections: list[Detection]) -> None:
         if not 1 <= len(initial_detections) <= 5:
             raise TrackingError("参加者の顔を1〜5人の範囲で確認できません。")
         initial = sorted(initial_detections, key=lambda face: face.center_x)
+        now = time.monotonic()
         self.tracks = {
-            index: TrackedFace(index, detection)
+            index: TrackedFace(index, detection, last_seen_at=now)
             for index, detection in enumerate(initial, start=1)
         }
 
     def update(self, detections: list[Detection]) -> None:
+        now = time.monotonic()
         if len(detections) > len(self.tracks):
-            raise TrackingError("新しい顔または追跡の入れ替わりを検出しました。")
+            raise ExtraFacesError("新しい顔または追跡の入れ替わりを検出しました。")
 
         track_ids = list(self.tracks)
+        for track in self.tracks.values():
+            if now - track.last_seen_at > self.MISSED_SECONDS_GRACE:
+                track.lost = True
         assignments: list[tuple[float, tuple[int, ...], tuple[int, ...]]] = []
         for chosen_tracks in itertools.combinations(track_ids, len(detections)):
             for detection_order in itertools.permutations(range(len(detections))):
@@ -143,7 +152,6 @@ class FaceTracker:
         if not assignments:
             for track in self.tracks.values():
                 track.visible = False
-                track.missed_frames += 1
             return
 
         assignments.sort(key=lambda item: item[0])
@@ -174,26 +182,30 @@ class FaceTracker:
             detection = assigned_detections.get(track_id)
             if detection is None:
                 track.visible = False
-                track.missed_frames += 1
-                if track.missed_frames > self.MAX_MISSED_FRAMES:
-                    track.lost = True
             else:
                 track.detection = detection
                 track.visible = True
-                track.missed_frames = 0
+                track.last_seen_at = now
 
     def visible_ids(self) -> set[int]:
+        now = time.monotonic()
         return {
             track_id
             for track_id, track in self.tracks.items()
             if (
                 not track.lost
-                and track.missed_frames <= self.MISSED_FRAME_GRACE
+                and now - track.last_seen_at <= self.MISSED_SECONDS_GRACE
             )
         }
 
+    def detected_ids(self) -> set[int]:
+        return {
+            track_id for track_id in self.visible_ids()
+            if self.tracks[track_id].visible
+        }
+
     def answer(self, correct_answer: str) -> tuple[set[int], set[int]]:
-        visible = self.visible_ids()
+        visible = self.detected_ids()
         if not visible:
             return set(), set(self.tracks)
         correct_ids = {

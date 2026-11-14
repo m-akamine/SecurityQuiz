@@ -102,31 +102,36 @@ class FaceTrackerTests(unittest.TestCase):
         self.assertEqual(wrong, {1})
 
     def test_no_visible_face_is_distinct_from_wrong_answers(self):
-        tracker = FaceTracker([self.face(0.2)])
-        for _ in range(tracker.MISSED_FRAME_GRACE + 1):
+        with patch("quiz_core.time.monotonic", return_value=10):
+            tracker = FaceTracker([self.face(0.2)])
+        with patch("quiz_core.time.monotonic", return_value=13.1):
             tracker.update([])
+            correct, wrong = tracker.answer("〇")
+            self.assertEqual(correct, set())
+            self.assertEqual(wrong, {1})
+            self.assertEqual(tracker.visible_ids(), set())
+
+    def test_brief_detection_drop_is_visible_but_not_used_for_answer(self):
+        tracker = FaceTracker([self.face(0.2)])
+        tracker.update([])
         correct, wrong = tracker.answer("〇")
         self.assertEqual(correct, set())
         self.assertEqual(wrong, {1})
-        self.assertEqual(tracker.visible_ids(), set())
-
-    def test_brief_detection_drop_uses_last_tracked_position(self):
-        tracker = FaceTracker([self.face(0.2)])
-        tracker.update([])
-        correct, wrong = tracker.answer("〇")
-        self.assertEqual(correct, {1})
-        self.assertEqual(wrong, set())
         self.assertEqual(tracker.visible_ids(), {1})
 
-    def test_detection_drop_uses_last_position_for_thirty_frames(self):
-        tracker = FaceTracker([self.face(0.2)])
-        for _ in range(FaceTracker.MISSED_FRAME_GRACE):
+    def test_detection_drop_grace_is_three_seconds_not_frame_count(self):
+        with patch("quiz_core.time.monotonic", return_value=10):
+            tracker = FaceTracker([self.face(0.2)])
+        with patch("quiz_core.time.monotonic", return_value=12.9):
+            for _ in range(100):
+                tracker.update([])
+            self.assertEqual(tracker.visible_ids(), {1})
+            tracker.update([self.face(0.21)])
+            self.assertEqual(tracker.detected_ids(), {1})
+
+        with patch("quiz_core.time.monotonic", return_value=16):
             tracker.update([])
-
-        self.assertEqual(tracker.visible_ids(), {1})
-
-        tracker.update([])
-        self.assertEqual(tracker.visible_ids(), set())
+            self.assertEqual(tracker.visible_ids(), set())
 
     def test_extra_or_ambiguous_faces_fail_closed(self):
         tracker = FaceTracker([self.face(0.2), self.face(0.8)])
@@ -144,11 +149,12 @@ class FaceTrackerTests(unittest.TestCase):
         self.assertEqual(set(tracker.tracks), {1})
 
     def test_long_lost_track_cannot_be_reassociated(self):
-        tracker = FaceTracker([self.face(0.2)])
-        for _ in range(tracker.MAX_MISSED_FRAMES + 1):
+        with patch("quiz_core.time.monotonic", return_value=10):
+            tracker = FaceTracker([self.face(0.2)])
+        with patch("quiz_core.time.monotonic", return_value=13.1):
             tracker.update([])
-        with self.assertRaises(TrackingError):
-            tracker.update([self.face(0.2)])
+            with self.assertRaises(TrackingError):
+                tracker.update([self.face(0.2)])
 
     def test_normal_answer_movement_does_not_abort_tracking(self):
         tracker = FaceTracker([self.face(0.5)])
@@ -176,11 +182,14 @@ class GameProgressTests(unittest.TestCase):
         app.speech = Mock()
         app.speech.finished.return_value = True
         app.tracker = Mock()
+        app.tracker.tracks = {1: Mock(), 2: Mock()}
         app.tracker.visible_ids.return_value = {1, 2}
+        app.tracker.detected_ids.return_value = {1, 2}
         app.tracker.answer.return_value = ({1}, {2})
         app.correct_ids = {1}
         app.wrong_ids = {2}
         app.correct_missing_since = None
+        app.extra_face_since = None
         app._return_home = Mock()
         app._continue_or_finish = Mock()
         return app
@@ -192,6 +201,82 @@ class GameProgressTests(unittest.TestCase):
         self.assertEqual(app.mode, "reveal")
         self.assertEqual(app.correct_ids, {1})
         self.assertEqual(app.wrong_ids, {2})
+
+    def test_temporary_extra_face_pauses_and_resumes_without_judging(self):
+        app = self.make_app("answer", 6)
+        with patch("app.time.monotonic", return_value=10):
+            app.tracker = FaceTracker([FaceTrackerTests.face(0.2)])
+        app.latest_detections = [
+            FaceTrackerTests.face(0.2),
+            FaceTrackerTests.face(0.8),
+        ]
+        with patch("app.time.monotonic", return_value=11):
+            app._process_new_frame()
+        self.assertEqual(app.extra_face_since, 11)
+        app._return_home.assert_not_called()
+        with patch("app.time.monotonic", return_value=11.5):
+            app._advance_phase()
+        self.assertEqual(app.mode, "answer")
+
+        app.latest_detections = [FaceTrackerTests.face(0.2)]
+        with patch("app.time.monotonic", return_value=12):
+            app._process_new_frame()
+            self.assertEqual(app.phase_started, 7)
+            app._advance_phase()
+        self.assertIsNone(app.extra_face_since)
+        self.assertEqual(app.mode, "reveal")
+
+    def test_persistent_extra_face_stops_game_without_judging(self):
+        app = self.make_app("answer", 6)
+        with patch("app.time.monotonic", return_value=10):
+            app.tracker = FaceTracker([FaceTrackerTests.face(0.2)])
+        app.latest_detections = [
+            FaceTrackerTests.face(0.2),
+            FaceTrackerTests.face(0.8),
+        ]
+        with patch("app.time.monotonic", return_value=11):
+            app._process_new_frame()
+        with patch("app.time.monotonic", return_value=13):
+            app._advance_phase()
+        app._return_home.assert_called_once()
+        self.assertIn("新しい顔", app._return_home.call_args.args[0])
+        self.assertEqual(app.mode, "answer")
+
+    def test_extra_face_timeout_does_not_accept_late_recovery(self):
+        app = self.make_app("answer", 6)
+        with patch("app.time.monotonic", return_value=10):
+            app.tracker = FaceTracker([FaceTrackerTests.face(0.2)])
+        app.latest_detections = [
+            FaceTrackerTests.face(0.2),
+            FaceTrackerTests.face(0.8),
+        ]
+        with patch("app.time.monotonic", return_value=11):
+            app._process_new_frame()
+        app.latest_detections = [FaceTrackerTests.face(0.2)]
+        with patch("app.time.monotonic", return_value=13):
+            app._process_new_frame()
+        app._return_home.assert_called_once()
+
+    def test_answer_waits_for_missing_face_then_uses_fresh_detection(self):
+        app = self.make_app("answer", 10)
+        app.tracker.detected_ids.return_value = {1}
+        with patch("app.time.monotonic", return_value=15):
+            app._advance_phase()
+        self.assertEqual(app.mode, "answer")
+        app.tracker.answer.assert_not_called()
+
+        app.tracker.detected_ids.return_value = {1, 2}
+        with patch("app.time.monotonic", return_value=16):
+            app._advance_phase()
+        self.assertEqual(app.mode, "reveal")
+
+    def test_answer_retry_times_out_when_no_face_returns(self):
+        app = self.make_app("answer", 10)
+        app.tracker.detected_ids.return_value = set()
+        with patch("app.time.monotonic", return_value=17):
+            app._advance_phase()
+        app._return_home.assert_called_once()
+        self.assertIn("未回答", app._return_home.call_args.args[0])
 
     def test_staff_start_waits_for_face_without_consuming_set(self):
         app = SecurityQuizApp.__new__(SecurityQuizApp)
@@ -231,6 +316,7 @@ class GameProgressTests(unittest.TestCase):
         app = SecurityQuizApp.__new__(SecurityQuizApp)
         app.worker = None
         app.mode = "countdown"
+        app.extra_face_since = None
         app._advance_phase = Mock()
         app._status_text = Mock(return_value="ゲーム開始まで 5 秒")
         app.status_var = Mock()
@@ -265,6 +351,7 @@ class GameProgressTests(unittest.TestCase):
     def make_countdown_app(self, detections):
         app = SecurityQuizApp.__new__(SecurityQuizApp)
         app.mode = "countdown"
+        app.extra_face_since = None
         app.phase_started = 10
         app.countdown_last_face_seen_at = 15 if detections else 10
         app.home_message = ""
@@ -359,12 +446,12 @@ class GameProgressTests(unittest.TestCase):
 
         with patch("app.time.monotonic", return_value=15):
             app._advance_phase()
+            self.assertEqual(app.tracker.visible_ids(), {1})
 
         self.assertEqual(app.mode, "question")
         self.assertEqual(app.current_set_id, 3)
         self.assertEqual(app.next_set_id, 4)
         self.assertEqual(app.question_index, 0)
-        self.assertEqual(app.tracker.visible_ids(), {1})
         app._begin_question.assert_called_once_with()
 
     def test_countdown_expiry_without_faces_returns_home_and_keeps_same_set(self):
