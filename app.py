@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+import math
 import os
 import shutil
 import subprocess
@@ -88,6 +89,63 @@ def merge_face_boxes(
             if not duplicate:
                 merged.append(box)
     return sorted(merged, key=lambda box: box[0])
+
+
+def detect_faces(
+    gray: Any,
+    frontal_detector: Any,
+    profile_detector: Any,
+    tracked_boxes: tuple[tuple[float, float, float, float], ...] | None,
+) -> list[tuple[int, int, int, int]]:
+    height, width = gray.shape[:2]
+    regions = []
+    if tracked_boxes is None:
+        regions.append((0, 0, width, height))
+    else:
+        for x, y, box_width, box_height in tracked_boxes:
+            center_x = x + box_width / 2
+            center_y = y + box_height / 2
+            radius_x = max(0.18, 2.5 * box_width)
+            radius_y = max(0.12, 2.0 * box_height)
+            left = max(0, math.floor((center_x - radius_x) * width))
+            top = max(0, math.floor((center_y - radius_y) * height))
+            right = min(width, math.ceil((center_x + radius_x) * width))
+            bottom = min(height, math.ceil((center_y + radius_y) * height))
+            if right > left and bottom > top:
+                regions.append((left, top, right, bottom))
+
+    groups: list[list[tuple[int, int, int, int]]] = []
+    for left, top, right, bottom in regions:
+        region = gray[top:bottom, left:right]
+        frontal = frontal_detector.detectMultiScale(
+            region, scaleFactor=1.12, minNeighbors=6, minSize=(40, 40)
+        )
+        profile = profile_detector.detectMultiScale(
+            region, scaleFactor=1.12, minNeighbors=8, minSize=(40, 40)
+        )
+        flipped_profile = profile_detector.detectMultiScale(
+            cv2.flip(region, 1),
+            scaleFactor=1.12,
+            minNeighbors=8,
+            minSize=(40, 40),
+        )
+        groups.extend(
+            [
+                [
+                    (left + int(x), top + int(y), int(w), int(h))
+                    for x, y, w, h in frontal
+                ],
+                [
+                    (left + int(x), top + int(y), int(w), int(h))
+                    for x, y, w, h in profile
+                ],
+                [
+                    (right - int(x) - int(w), top + int(y), int(w), int(h))
+                    for x, y, w, h in flipped_profile
+                ],
+            ]
+        )
+    return merge_face_boxes(*groups)
 
 
 def enumerate_camera_devices() -> list[CameraDevice]:
@@ -228,6 +286,8 @@ class CameraWorker:
         self.error: str | None = None
         self.ready = False
         self._capture = None
+        self._tracked_boxes: tuple[tuple[float, float, float, float], ...] | None = None
+        self._regions_version = 0
 
     def start(self) -> None:
         self._thread.start()
@@ -237,6 +297,25 @@ class CameraWorker:
     ) -> tuple[Any, list[tuple[int, int, int, int]], int, bool, str | None]:
         with self._lock:
             return self.frame, list(self.faces), self.sequence, self.ready, self.error
+
+    def set_tracked_boxes(
+        self, boxes: tuple[tuple[float, float, float, float], ...] | None
+    ) -> None:
+        with self._lock:
+            if self._tracked_boxes != boxes:
+                scope_changed = (
+                    (self._tracked_boxes is None) != (boxes is None)
+                    or (
+                        self._tracked_boxes is not None
+                        and boxes is not None
+                        and len(self._tracked_boxes) != len(boxes)
+                    )
+                )
+                self._tracked_boxes = boxes
+                self._regions_version += 1
+                if scope_changed:
+                    self.faces = []
+                    self.sequence += 1
 
     def stop(self) -> bool:
         self._stop.set()
@@ -299,45 +378,15 @@ class CameraWorker:
 
                 mirrored = cv2.flip(frame, 1)
                 gray = cv2.cvtColor(mirrored, cv2.COLOR_BGR2GRAY)
-                frontal_faces = frontal_detector.detectMultiScale(
-                    gray,
-                    scaleFactor=1.12,
-                    minNeighbors=6,
-                    minSize=(40, 40),
-                )
-                profile_faces = profile_detector.detectMultiScale(
-                    gray,
-                    scaleFactor=1.12,
-                    minNeighbors=8,
-                    minSize=(40, 40),
-                )
-                flipped_profile_faces = profile_detector.detectMultiScale(
-                    cv2.flip(gray, 1),
-                    scaleFactor=1.12,
-                    minNeighbors=8,
-                    minSize=(40, 40),
-                )
-                frame_width = gray.shape[1]
-                detections = merge_face_boxes(
-                    [
-                        (int(x), int(y), int(box_width), int(box_height))
-                        for x, y, box_width, box_height in frontal_faces
-                    ],
-                    [
-                        (int(x), int(y), int(box_width), int(box_height))
-                        for x, y, box_width, box_height in profile_faces
-                    ],
-                    [
-                        (
-                            frame_width - int(x) - int(box_width),
-                            int(y),
-                            int(box_width),
-                            int(box_height),
-                        )
-                        for x, y, box_width, box_height in flipped_profile_faces
-                    ],
+                with self._lock:
+                    tracked_boxes = self._tracked_boxes
+                    regions_version = self._regions_version
+                detections = detect_faces(
+                    gray, frontal_detector, profile_detector, tracked_boxes
                 )
                 with self._lock:
+                    if regions_version != self._regions_version:
+                        continue
                     self.frame = mirrored
                     self.faces = detections
                     self.sequence += 1
@@ -788,8 +837,18 @@ class SecurityQuizApp:
             if self.correct_missing_since is not None:
                 self.correct_missing_since += paused
             self.extra_face_since = None
+        self._sync_tracking_regions()
         if self.mode in ("explanation", "exit") and self.correct_ids:
             self._check_correct_presence()
+
+    def _sync_tracking_regions(self) -> None:
+        if self.worker is not None:
+            boxes = (
+                tuple(track.detection.box for track in self.tracker.tracks.values())
+                if self.tracker is not None
+                else None
+            )
+            self.worker.set_tracked_boxes(boxes)
 
     def _start_countdown(self) -> None:
         self.mode = "countdown"
@@ -844,6 +903,7 @@ class SecurityQuizApp:
                     self.mode = "home"
                     self.home_message = str(error)
                     return
+                self._sync_tracking_regions()
                 self.current_set_id = self.next_set_id
                 self.next_set_id = self.next_set_id % 5 + 1
                 self.question_index = 0
@@ -925,6 +985,7 @@ class SecurityQuizApp:
                 return
             self.correct_ids = surviving_correct
             self.tracker.retain(surviving_correct)
+            self._sync_tracking_regions()
             self._continue_or_finish()
 
     def _check_correct_presence(self) -> None:
@@ -1391,6 +1452,7 @@ class SecurityQuizApp:
     def _return_home(self, message: str) -> None:
         self.mode = "home"
         self.tracker = None
+        self._sync_tracking_regions()
         self.home_message = ""
         self.correct_ids.clear()
         self.wrong_ids.clear()

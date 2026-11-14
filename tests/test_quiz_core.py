@@ -4,9 +4,13 @@ import unittest
 from pathlib import Path
 from unittest.mock import Mock, patch
 
+import numpy as np
+
 from app import (
     CameraDevice,
+    CameraWorker,
     SecurityQuizApp,
+    detect_faces,
     devices_from_names,
     merge_face_boxes,
 )
@@ -50,6 +54,74 @@ class CameraDeviceTests(unittest.TestCase):
         self.assertEqual(devices_from_names(["", "  ", "Camera"]), [
             CameraDevice(2, "Camera"),
         ])
+
+    def test_quiz_search_excludes_faces_outside_tracked_regions(self):
+        image = np.zeros((300, 1000), dtype=np.uint8)
+        image[120:160, 180:220] = 1
+        image[120:160, 800:840] = 1
+
+        def find_faces(region, **_kwargs):
+            ys, xs = np.where(region == 1)
+            boxes = []
+            columns = np.unique(xs)
+            for group in np.split(columns, np.flatnonzero(np.diff(columns) > 1) + 1):
+                if not len(group):
+                    continue
+                mask = (xs >= group[0]) & (xs <= group[-1])
+                boxes.append((int(xs[mask].min()), int(ys[mask].min()), 40, 40))
+            return boxes
+
+        frontal = Mock()
+        frontal.detectMultiScale.side_effect = find_faces
+        profile = Mock()
+        profile.detectMultiScale.return_value = []
+        full = detect_faces(image, frontal, profile, None)
+        tracked = detect_faces(image, frontal, profile, ((0.18, 0.4, 0.04, 0.133),))
+
+        self.assertEqual(full, [(180, 120, 40, 40), (800, 120, 40, 40)])
+        self.assertEqual(tracked, [(180, 120, 40, 40)])
+
+    def test_profile_coordinates_are_restored_from_flipped_region(self):
+        image = np.zeros((300, 1000), dtype=np.uint8)
+        frontal = Mock()
+        frontal.detectMultiScale.return_value = []
+        profile = Mock()
+        profile.detectMultiScale.side_effect = [[], [(20, 10, 40, 40)]]
+
+        boxes = detect_faces(image, frontal, profile, ((0.18, 0.4, 0.04, 0.133),))
+
+        self.assertEqual(boxes, [(320, 70, 40, 40)])
+
+    def test_scope_change_invalidates_old_full_frame_detections(self):
+        worker = CameraWorker(0)
+        worker.faces = [(800, 120, 40, 40)]
+        worker.sequence = 4
+        worker.set_tracked_boxes(((0.18, 0.4, 0.04, 0.133),))
+        self.assertEqual(worker.faces, [])
+        self.assertEqual(worker.sequence, 5)
+        worker.faces = [(180, 120, 40, 40)]
+        worker.set_tracked_boxes(None)
+        self.assertEqual(worker.faces, [])
+        self.assertEqual(worker.sequence, 6)
+
+    def test_scoped_detection_searches_each_participant_near_image_edges(self):
+        image = np.zeros((300, 1000), dtype=np.uint8)
+        frontal = Mock()
+        frontal.detectMultiScale.side_effect = [
+            [(5, 10, 40, 40)],
+            [(20, 10, 40, 40)],
+        ]
+        profile = Mock()
+        profile.detectMultiScale.return_value = []
+
+        boxes = detect_faces(
+            image,
+            frontal,
+            profile,
+            ((0.0, 0.0, 0.04, 0.133), (0.96, 0.0, 0.04, 0.133)),
+        )
+
+        self.assertEqual(boxes, [(5, 10, 40, 40), (820, 10, 40, 40)])
 
 
 class QuestionDataTests(unittest.TestCase):
@@ -182,6 +254,7 @@ class GameProgressTests(unittest.TestCase):
         app.speech = Mock()
         app.speech.finished.return_value = True
         app.tracker = Mock()
+        app.worker = None
         app.tracker.tracks = {1: Mock(), 2: Mock()}
         app.tracker.visible_ids.return_value = {1, 2}
         app.tracker.detected_ids.return_value = {1, 2}
@@ -358,6 +431,7 @@ class GameProgressTests(unittest.TestCase):
         app.latest_detections = detections
         app.speech = Mock()
         app.tracker = None
+        app.worker = None
         app.next_set_id = 3
         app.current_set_id = 1
         app.question_index = 4
@@ -443,6 +517,7 @@ class GameProgressTests(unittest.TestCase):
 
     def test_countdown_expiry_starts_game_and_advances_set(self):
         app = self.make_countdown_app([FaceTrackerTests.face(0.3)])
+        app.worker = Mock()
 
         with patch("app.time.monotonic", return_value=15):
             app._advance_phase()
@@ -452,7 +527,33 @@ class GameProgressTests(unittest.TestCase):
         self.assertEqual(app.current_set_id, 3)
         self.assertEqual(app.next_set_id, 4)
         self.assertEqual(app.question_index, 0)
+        app.worker.set_tracked_boxes.assert_called_once_with(
+            (FaceTrackerTests.face(0.3).box,)
+        )
         app._begin_question.assert_called_once_with()
+
+    def test_search_regions_follow_participant_movement(self):
+        app = self.make_app("answer", 10)
+        app.worker = Mock()
+        app.tracker = FaceTracker([FaceTrackerTests.face(0.2)])
+        app.latest_detections = [FaceTrackerTests.face(0.3)]
+
+        app._process_new_frame()
+
+        app.worker.set_tracked_boxes.assert_called_once_with(
+            (FaceTrackerTests.face(0.3).box,)
+        )
+
+    def test_return_home_restores_full_frame_search(self):
+        app = self.make_app("answer", 10)
+        app.worker = Mock()
+        app.root = Mock()
+        app._return_home = SecurityQuizApp._return_home.__get__(app)
+
+        app._return_home("終了")
+
+        app.worker.set_tracked_boxes.assert_called_once_with(None)
+        self.assertEqual(app.mode, "home")
 
     def test_countdown_expiry_without_faces_returns_home_and_keeps_same_set(self):
         app = self.make_countdown_app([])
