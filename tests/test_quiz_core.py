@@ -913,11 +913,41 @@ class GameProgressTests(unittest.TestCase):
         panels = [call.kwargs for call in app.canvas.create_rectangle.call_args_list]
         self.assertEqual(
             [(panel.get("fill"), panel.get("outline")) for panel in panels[1:3]],
-            [("", "#059669"), ("", "#E11D48")],
+            [("#A7F3D0", "#059669"), ("", "#E11D48")],
         )
         bar = app.canvas.create_rectangle.call_args_list[-1]
         self.assertAlmostEqual(bar.args[2], 40 + (1280 - 80) * 0.8)
         app._render_faces.assert_called_once()
+
+    def test_only_the_correct_reveal_zone_flashes(self):
+        for answer, highlighted in (("〇", ["#A7F3D0", ""]), ("×", ["", "#FECDD3"])):
+            for mode in ("answer", "reveal", "exit"):
+                for elapsed in (0, 0.5, 1):
+                    with self.subTest(answer=answer, mode=mode, elapsed=elapsed):
+                        app = self.make_app(mode, 10)
+                        app.sets[1][0].update({"level": 1, "answer": answer})
+                        app.canvas = Mock()
+                        app.canvas.bbox.return_value = None
+                        app._render_faces = Mock()
+                        with patch("app.time.monotonic", return_value=10 + elapsed):
+                            app._render_game(1280, 760)
+                        panels = app.canvas.create_rectangle.call_args_list[1:3]
+                        fills = [panel.kwargs["fill"] for panel in panels]
+                        expected = highlighted if mode == "reveal" and elapsed != 0.5 else ["", ""]
+                        self.assertEqual(fills, expected)
+
+    def test_reveal_flash_freezes_with_the_gauge_when_paused(self):
+        app = self.make_app("reveal", 10)
+        app.sets[1][0]["level"] = 1
+        app.extra_face_since = 10.5
+        app.canvas = Mock()
+        app.canvas.bbox.return_value = None
+        app._render_faces = Mock()
+        with patch("app.time.monotonic", return_value=12):
+            app._render_game(1280, 760)
+        self.assertEqual(app.canvas.create_rectangle.call_args_list[1].kwargs["fill"], "")
+        bar = app.canvas.create_rectangle.call_args_list[-1]
+        self.assertAlmostEqual(bar.args[2], 40 + (1280 - 80) * 0.9)
 
     def test_exit_uses_selection_layout_with_three_second_gauge(self):
         app = self.make_app("exit", 10)

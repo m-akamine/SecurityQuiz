@@ -49,6 +49,8 @@ WHITE = "#F0F9FF"
 PALE_CYAN = "#BAE6FD"
 GREEN = "#059669"
 RED = "#E11D48"
+PALE_GREEN = "#A7F3D0"
+PALE_RED = "#FECDD3"
 MAGENTA = "#FF00FF"
 START_COUNTDOWN_SECONDS = 10
 RESULT_SCREEN_SECONDS = 5
@@ -1516,12 +1518,22 @@ class SecurityQuizApp:
         header_bottom = detail_bottom + 8
         self.canvas.coords(header, width * 0.025, header_top, width * 0.975, header_bottom)
 
+        display_time = (
+            self.extra_face_since
+            if self.extra_face_since is not None
+            else time.monotonic()
+        )
+        flash_correct = (
+            self.mode == "reveal"
+            and int(max(0, display_time - self.phase_started) * 2) % 2 == 0
+        )
         zone_top, zone_bottom = header_bottom + 8, height * 0.94
-        for left, right, color, symbol in (
-            (width * 0.025, width * 0.475, GREEN, "〇"),
-            (width * 0.525, width * 0.975, RED, "×"),
+        for left, right, color, highlight, symbol in (
+            (width * 0.025, width * 0.475, GREEN, PALE_GREEN, "〇"),
+            (width * 0.525, width * 0.975, RED, PALE_RED, "×"),
         ):
-            self._panel(left, zone_top, right, zone_bottom, fill="", outline=color)
+            fill = highlight if flash_correct and question["answer"] == symbol else ""
+            self._panel(left, zone_top, right, zone_bottom, fill=fill, outline=color)
             zone_width, zone_height = right - left, zone_bottom - zone_top
             size = max(1, int(min(zone_width, zone_height) * 0.8))
             symbol_id = self.canvas.create_text(
@@ -1542,11 +1554,6 @@ class SecurityQuizApp:
         self._render_faces(
             width, height,
             face_bounds=(width * 0.025, zone_top, width * 0.975, zone_bottom),
-        )
-        display_time = (
-            self.extra_face_since
-            if self.extra_face_since is not None
-            else time.monotonic()
         )
         duration = 3 if self.mode == "exit" else 5
         if self.mode == "answer" and self.extra_face_since is None:
