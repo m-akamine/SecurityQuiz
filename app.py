@@ -127,8 +127,8 @@ def detect_faces(
         for x, y, box_width, box_height in tracked_boxes:
             center_x = x + box_width / 2
             center_y = y + box_height / 2
-            radius_x = max(0.18, 2.5 * box_width)
-            radius_y = max(0.12, 2.0 * box_height)
+            radius_x = max(0.25, 2.5 * box_width)
+            radius_y = max(0.16, 2.0 * box_height)
             left = max(0, math.floor((center_x - radius_x) * width))
             top = max(0, math.floor((center_y - radius_y) * height))
             right = min(width, math.ceil((center_x + radius_x) * width))
@@ -139,18 +139,25 @@ def detect_faces(
     groups: list[list[tuple[int, int, int, int]]] = []
     for left, top, right, bottom, tracked_box in regions:
         region = gray[top:bottom, left:right]
+        scale_factor = 1.10 if tracked_box is not None else 1.12
+        frontal_neighbors = 4 if tracked_box is not None else 6
+        profile_neighbors = 6 if tracked_box is not None else 8
+        min_size = (32, 32) if tracked_box is not None else (40, 40)
+
         def find_in_region(image: Any) -> list[tuple[int, int, int, int]]:
             frontal = frontal_detector.detectMultiScale(
-                image, scaleFactor=1.12, minNeighbors=6, minSize=(40, 40)
+                image, scaleFactor=scale_factor,
+                minNeighbors=frontal_neighbors, minSize=min_size,
             )
             profile = profile_detector.detectMultiScale(
-                image, scaleFactor=1.12, minNeighbors=8, minSize=(40, 40)
+                image, scaleFactor=scale_factor,
+                minNeighbors=profile_neighbors, minSize=min_size,
             )
             flipped_profile = profile_detector.detectMultiScale(
                 cv2.flip(image, 1),
-                scaleFactor=1.12,
-                minNeighbors=8,
-                minSize=(40, 40),
+                scaleFactor=scale_factor,
+                minNeighbors=profile_neighbors,
+                minSize=min_size,
             )
             return merge_face_boxes(
                 [
@@ -835,8 +842,9 @@ class SecurityQuizApp:
         if self.mode == "camera_test":
             self.mode = "home"
             self._render()
-            return "break"
-        return None
+        else:
+            self.close()
+        return "break"
 
     def toggle_camera_test(self) -> None:
         if self.mode == "camera_test":
@@ -1293,7 +1301,7 @@ class SecurityQuizApp:
                     "顔位置を画面に表示するためだけに使い、顔認証・本人特定はしません。\n"
                     "カメラ映像・画像は保存せず、外部へ送信しません。\n"
                     "スタッフ：F7 手動開始　F8 次へ　F9 不正解\n"
-                    "F11：全画面切替　 Alt+F4：終了"
+                    "F11：全画面切替　 Esc：終了"
                 ),
                 fill=PALE_CYAN,
                 font=(self.font_family, 14),

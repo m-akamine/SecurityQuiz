@@ -129,7 +129,7 @@ class CameraDeviceTests(unittest.TestCase):
         frontal = Mock()
         frontal.detectMultiScale.return_value = []
         profile = Mock()
-        profile.detectMultiScale.side_effect = [[], [(20, 10, 40, 40)]]
+        profile.detectMultiScale.side_effect = [[], [(90, 10, 40, 40)]]
 
         boxes = detect_faces(image, frontal, profile, ((0.18, 0.4, 0.04, 0.133),))
 
@@ -140,7 +140,7 @@ class CameraDeviceTests(unittest.TestCase):
         frontal = Mock()
         frontal.detectMultiScale.side_effect = [
             [],
-            [(161, 60, 40, 40), (320, 60, 40, 40), (131, 30, 100, 100)],
+            [(180, 60, 40, 40), (320, 60, 40, 40), (131, 30, 100, 100)],
         ]
         profile = Mock()
         profile.detectMultiScale.return_value = []
@@ -183,7 +183,7 @@ class CameraDeviceTests(unittest.TestCase):
         frontal = Mock()
         frontal.detectMultiScale.side_effect = [
             [(5, 10, 40, 40)],
-            [(20, 10, 40, 40)],
+            [(90, 10, 40, 40)],
         ]
         profile = Mock()
         profile.detectMultiScale.return_value = []
@@ -196,6 +196,25 @@ class CameraDeviceTests(unittest.TestCase):
         )
 
         self.assertEqual(boxes, [(5, 10, 40, 40), (820, 10, 40, 40)])
+
+    def test_scoped_detection_finds_small_face_after_a_larger_move(self):
+        image = np.zeros((300, 1000), dtype=np.uint8)
+        image[120:156, 390:426] = 1
+
+        def find_faces(region, **kwargs):
+            ys, xs = np.where(region == 1)
+            if not len(xs) or kwargs["minSize"][0] > 36 or kwargs["minNeighbors"] > 4:
+                return []
+            if xs.max() - xs.min() + 1 < 36:
+                return []
+            return [(int(xs.min()), int(ys.min()), 36, 36)]
+
+        frontal = Mock()
+        frontal.detectMultiScale.side_effect = find_faces
+        profile = Mock()
+        profile.detectMultiScale.return_value = []
+        boxes = detect_faces(image, frontal, profile, ((0.18, 0.4, 0.04, 0.133),))
+        self.assertEqual(boxes, [(390, 120, 36, 36)])
 
 
 class QuestionDataTests(unittest.TestCase):
@@ -357,6 +376,23 @@ class GameProgressTests(unittest.TestCase):
         app._return_home = Mock()
         app._continue_or_finish = Mock()
         return app
+
+    def test_escape_closes_application_from_game_and_home(self):
+        for mode in ("home", "countdown", "answer", "explanation"):
+            with self.subTest(mode=mode):
+                app = self.make_app(mode, 10)
+                app.close = Mock()
+                self.assertEqual(app._escape_pressed(None), "break")
+                app.close.assert_called_once_with()
+
+    def test_escape_returns_from_camera_test_without_exiting(self):
+        app = self.make_app("camera_test", 10)
+        app.close = Mock()
+        app._render = Mock()
+        self.assertEqual(app._escape_pressed(None), "break")
+        self.assertEqual(app.mode, "home")
+        app._render.assert_called_once_with()
+        app.close.assert_not_called()
 
     def test_answer_timeout_shows_result(self):
         app = self.make_app("answer", 10)
