@@ -125,7 +125,7 @@ def detect_faces(
     height, width = gray.shape[:2]
     regions = []
     if tracked_boxes is None:
-        regions.append((0, 0, width, height))
+        regions.append((0, 0, width, height, None))
     else:
         for x, y, box_width, box_height in tracked_boxes:
             center_x = x + box_width / 2
@@ -137,25 +137,25 @@ def detect_faces(
             right = min(width, math.ceil((center_x + radius_x) * width))
             bottom = min(height, math.ceil((center_y + radius_y) * height))
             if right > left and bottom > top:
-                regions.append((left, top, right, bottom))
+                regions.append((left, top, right, bottom, (x, y, box_width, box_height)))
 
     groups: list[list[tuple[int, int, int, int]]] = []
-    for left, top, right, bottom in regions:
+    for left, top, right, bottom, tracked_box in regions:
         region = gray[top:bottom, left:right]
-        frontal = frontal_detector.detectMultiScale(
-            region, scaleFactor=1.12, minNeighbors=6, minSize=(40, 40)
-        )
-        profile = profile_detector.detectMultiScale(
-            region, scaleFactor=1.12, minNeighbors=8, minSize=(40, 40)
-        )
-        flipped_profile = profile_detector.detectMultiScale(
-            cv2.flip(region, 1),
-            scaleFactor=1.12,
-            minNeighbors=8,
-            minSize=(40, 40),
-        )
-        groups.extend(
-            [
+        def find_in_region(image: Any) -> list[tuple[int, int, int, int]]:
+            frontal = frontal_detector.detectMultiScale(
+                image, scaleFactor=1.12, minNeighbors=6, minSize=(40, 40)
+            )
+            profile = profile_detector.detectMultiScale(
+                image, scaleFactor=1.12, minNeighbors=8, minSize=(40, 40)
+            )
+            flipped_profile = profile_detector.detectMultiScale(
+                cv2.flip(image, 1),
+                scaleFactor=1.12,
+                minNeighbors=8,
+                minSize=(40, 40),
+            )
+            return merge_face_boxes(
                 [
                     (left + int(x), top + int(y), int(w), int(h))
                     for x, y, w, h in frontal
@@ -168,8 +168,25 @@ def detect_faces(
                     (right - int(x) - int(w), top + int(y), int(w), int(h))
                     for x, y, w, h in flipped_profile
                 ],
+            )
+
+        found = find_in_region(region)
+        if not found and tracked_box is not None:
+            x, y, box_width, box_height = tracked_box
+            center_x = x + box_width / 2
+            center_y = y + box_height / 2
+            found = [
+                (face_x, face_y, face_width, face_height)
+                for face_x, face_y, face_width, face_height
+                in find_in_region(cv2.equalizeHist(region))
+                if (
+                    abs((face_x + face_width / 2) / width - center_x) <= box_width
+                    and abs((face_y + face_height / 2) / height - center_y) <= box_height
+                    and 0.6 * box_width <= face_width / width <= 1.6 * box_width
+                    and 0.6 * box_height <= face_height / height <= 1.6 * box_height
+                )
             ]
-        )
+        groups.append(found)
     return merge_face_boxes(*groups)
 
 

@@ -135,6 +135,37 @@ class CameraDeviceTests(unittest.TestCase):
 
         self.assertEqual(boxes, [(320, 70, 40, 40)])
 
+    def test_scoped_detection_retries_low_contrast_near_previous_face(self):
+        image = np.tile(np.arange(1000, dtype=np.uint16) % 40 + 80, (300, 1)).astype(np.uint8)
+        frontal = Mock()
+        frontal.detectMultiScale.side_effect = [
+            [],
+            [(161, 60, 40, 40), (320, 60, 40, 40), (131, 30, 100, 100)],
+        ]
+        profile = Mock()
+        profile.detectMultiScale.return_value = []
+        tracked = ((0.18, 0.4, 0.04, 0.1333333333),)
+
+        boxes = detect_faces(image, frontal, profile, tracked)
+
+        self.assertEqual(boxes, [(180, 120, 40, 40)])
+        self.assertEqual(frontal.detectMultiScale.call_count, 2)
+        original = frontal.detectMultiScale.call_args_list[0].args[0]
+        enhanced = frontal.detectMultiScale.call_args_list[1].args[0]
+        self.assertEqual(original.shape, enhanced.shape)
+        self.assertGreater(int(enhanced.max()) - int(enhanced.min()),
+                           int(original.max()) - int(original.min()))
+
+    def test_home_detection_does_not_retry_with_enhanced_image(self):
+        image = np.zeros((300, 1000), dtype=np.uint8)
+        frontal = Mock()
+        frontal.detectMultiScale.return_value = []
+        profile = Mock()
+        profile.detectMultiScale.return_value = []
+
+        self.assertEqual(detect_faces(image, frontal, profile, None), [])
+        self.assertEqual(frontal.detectMultiScale.call_count, 1)
+
     def test_scope_change_invalidates_old_full_frame_detections(self):
         worker = CameraWorker(0)
         worker.faces = [(800, 120, 40, 40)]
