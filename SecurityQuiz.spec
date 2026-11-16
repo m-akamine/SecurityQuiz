@@ -1,7 +1,7 @@
 # -*- mode: python ; coding: utf-8 -*-
 from PyInstaller.utils.hooks import collect_all
 
-datas = [('261113セキュリティクイズ問題.json', '.'), ('BackgroundImage_Clean.png', '.')]
+datas = [('261113セキュリティクイズ問題.json', '.'), ('BackgroundImage_Clean.png', '.'), ('sound', 'sound')]
 binaries = []
 hiddenimports = ['pygrabber.dshow_graph', 'comtypes.client']
 tmp_ret = collect_all('cv2')

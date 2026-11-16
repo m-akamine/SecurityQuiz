@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+import ctypes
 import math
 import os
 import shutil
@@ -55,7 +56,7 @@ MAGENTA = "#FF00FF"
 START_COUNTDOWN_SECONDS = 10
 RESULT_SCREEN_SECONDS = 5
 WIN_SCREEN_SECONDS = 10
-QUESTION_INTRO_SECONDS = 2
+QUESTION_INTRO_SECONDS = 4
 FACE_RECOVERY_SECONDS = 10
 COUNTDOWN_FACE_LOSS_GRACE_SECONDS = 2.0
 ANSWER_FACE_RETRY_SECONDS = 2.0
@@ -294,6 +295,109 @@ class LocalSpeech:
         self.process = None
 
 
+class Mp3SoundPlayer:
+    def __init__(self, sound_directory: Path) -> None:
+        self.sound_directory = sound_directory
+        winmm = ctypes.WinDLL("winmm")
+        self._send_command = winmm.mciSendStringW
+        self._send_command.argtypes = (
+            ctypes.c_wchar_p, ctypes.c_wchar_p, ctypes.c_uint, ctypes.c_void_p
+        )
+        self._send_command.restype = ctypes.c_uint
+        self._get_error = winmm.mciGetErrorStringW
+        self._get_error.argtypes = (
+            ctypes.c_uint, ctypes.c_wchar_p, ctypes.c_uint
+        )
+        self._get_error.restype = ctypes.c_int
+        self._lock = threading.Lock()
+        self._generation = 0
+        self._stop_event = threading.Event()
+        self._thread: threading.Thread | None = None
+        self._error: str | None = None
+
+    def _send(self, command: str) -> str:
+        output = ctypes.create_unicode_buffer(256)
+        error_code = self._send_command(command, output, len(output), None)
+        if error_code:
+            message = ctypes.create_unicode_buffer(256)
+            self._get_error(error_code, message, len(message))
+            raise RuntimeError(message.value or f"MCI error {error_code}")
+        return output.value
+
+    def play(self, *filenames: str) -> None:
+        paths = [self.sound_directory / filename for filename in filenames]
+        for path in paths:
+            if not path.is_file():
+                raise FileNotFoundError(f"効果音ファイルが見つかりません: {path.name}")
+        if not paths:
+            return
+
+        self.stop()
+        with self._lock:
+            self._generation += 1
+            generation = self._generation
+            stop_event = threading.Event()
+            self._stop_event = stop_event
+            self._error = None
+        self._thread = threading.Thread(
+            target=self._play_sequence,
+            args=(paths, generation, stop_event),
+            name="quiz-sound",
+            daemon=True,
+        )
+        self._thread.start()
+
+    def _play_sequence(
+        self, paths: list[Path], generation: int, stop_event: threading.Event
+    ) -> None:
+        for index, path in enumerate(paths):
+            if stop_event.is_set():
+                return
+            alias = f"quiz_sound_{generation}_{index}"
+            opened = False
+            try:
+                self._send(f'open "{path}" type mpegvideo alias {alias}')
+                opened = True
+                if stop_event.is_set():
+                    return
+                self._send(f"play {alias}")
+                while True:
+                    if stop_event.wait(0.03):
+                        self._send(f"stop {alias}")
+                        return
+                    if self._send(f"status {alias} mode") != "playing":
+                        break
+            except (OSError, RuntimeError) as error:
+                with self._lock:
+                    self._error = str(error)
+                return
+            finally:
+                if opened:
+                    try:
+                        self._send(f"close {alias}")
+                    except (OSError, RuntimeError) as error:
+                        with self._lock:
+                            self._error = str(error)
+
+    def stop(self) -> None:
+        self._stop_event.set()
+        thread = self._thread
+        if thread is not None:
+            thread.join(timeout=2)
+            if thread.is_alive():
+                raise RuntimeError("効果音の停止がタイムアウトしました。")
+            self._thread = None
+        error = self.take_error()
+        if error:
+            raise RuntimeError(error)
+
+    def take_error(self) -> str | None:
+        with self._lock:
+            error = self._error
+            self._error = None
+        return error
+
+
 class CameraWorker:
     """Capture and detect faces on a worker; no frame is written or transmitted."""
 
@@ -477,6 +581,8 @@ class SecurityQuizApp:
             self.speech = LocalSpeech()
         except (RuntimeError, subprocess.SubprocessError, OSError) as error:
             self.setup_errors.append(str(error))
+        self.sound_effects = Mp3SoundPlayer(Path(__file__).with_name("sound"))
+        self.sound_error: str | None = None
 
         self.worker: CameraWorker | None = None
         self.camera_error: str | None = None
@@ -781,13 +887,18 @@ class SecurityQuizApp:
                     self.latest_detections = self._make_detections(faces, frame)
                     self._process_new_frame()
 
+        sound_effects = getattr(self, "sound_effects", None)
+        if sound_effects is not None:
+            sound_error = sound_effects.take_error()
+            if sound_error:
+                self.sound_error = f"効果音を再生できません: {sound_error}"
+
         if self.mode in (
             "question",
             "question_intro",
             "answer",
             "reveal",
             "explanation",
-            "exit",
             "countdown",
             "notice",
             "win",
@@ -878,7 +989,7 @@ class SecurityQuizApp:
         self._sync_tracking_regions()
         if self.mode in ("question_intro", "question", "answer"):
             required_ids = set(self.tracker.tracks)
-        elif self.mode in ("reveal", "explanation", "exit"):
+        elif self.mode in ("reveal", "explanation"):
             required_ids = self.correct_ids
         else:
             required_ids = set()
@@ -892,7 +1003,7 @@ class SecurityQuizApp:
             if self.correct_missing_since is not None:
                 self.correct_missing_since += paused
             self.face_loss_since = None
-        if self.mode in ("explanation", "exit") and self.correct_ids:
+        if self.mode == "explanation" and self.correct_ids:
             self._check_correct_presence()
 
     def _sync_tracking_regions(self) -> None:
@@ -916,12 +1027,32 @@ class SecurityQuizApp:
             return
         self.mode = "question_intro"
         self.phase_started = time.monotonic()
+        self._play_sounds("Q_sound.mp3", f"Q{self.question_index + 1}.mp3")
+
+    def _play_sounds(self, *filenames: str) -> None:
+        sound_effects = getattr(self, "sound_effects", None)
+        if sound_effects is None:
+            return
+        try:
+            sound_effects.play(*filenames)
+            self.sound_error = None
+        except (FileNotFoundError, OSError, RuntimeError) as error:
+            self.sound_error = f"効果音を再生できません: {error}"
+
+    def _stop_sounds(self) -> None:
+        sound_effects = getattr(self, "sound_effects", None)
+        if sound_effects is not None:
+            try:
+                sound_effects.stop()
+            except (OSError, RuntimeError) as error:
+                self.sound_error = f"効果音を停止できません: {error}"
 
     def _advance_phase(self) -> None:
         now = time.monotonic()
         if self.mode in ("notice", "win", "lose"):
             duration = WIN_SCREEN_SECONDS if self.mode == "win" else RESULT_SCREEN_SECONDS
             if now - self.phase_started >= duration:
+                self._stop_sounds()
                 self.home_message = self.end_message if self.mode == "notice" else ""
                 self.mode = "home"
             return
@@ -989,6 +1120,7 @@ class SecurityQuizApp:
             ):
                 self.mode = "answer"
                 self.phase_started = now
+                self._play_sounds("Timer.mp3")
 
         elif self.mode == "answer":
             if now - self.phase_started >= 5:
@@ -1009,8 +1141,14 @@ class SecurityQuizApp:
                         "回答時間終了時に誰も検出できませんでした。未回答として終了します。"
                     )
                     return
+                self._stop_sounds()
                 self.mode = "reveal"
                 self.phase_started = now
+                self._play_sounds(
+                    "CorrectAnswer.mp3"
+                    if self.correct_ids
+                    else "IncorrectAnswer.mp3"
+                )
 
         elif self.mode == "reveal" and now - self.phase_started >= 5:
             self.mode = "explanation"
@@ -1032,33 +1170,9 @@ class SecurityQuizApp:
                 and self.speech.finished()
             ):
                 if self.wrong_ids:
-                    self.mode = "exit"
-                    self.phase_started = now
+                    self._show_end_screen("lose", "残念！もう一度チャレンジして")
                 else:
                     self._continue_or_finish()
-
-        elif self.mode == "exit" and now - self.phase_started >= 3:
-            if not self.correct_ids:
-                self._show_end_screen("lose", "残念！もう一度チャレンジして")
-                return
-            visible = self.tracker.visible_ids() if self.tracker else set()
-            remaining_wrong = visible & self.wrong_ids
-            if remaining_wrong:
-                self._return_home(
-                    "不正解の参加者が退場時間後もカメラ範囲内にいます。"
-                    "次の問題へ進まずホーム画面に戻ります。"
-                )
-                return
-            surviving_correct = self.correct_ids & visible
-            if not surviving_correct:
-                self._return_home(
-                    "正解者を確認できなくなりました。誤判定防止のため終了します。"
-                )
-                return
-            self.correct_ids = surviving_correct
-            self.tracker.retain(surviving_correct)
-            self._sync_tracking_regions()
-            self._continue_or_finish()
 
     def _check_correct_presence(self) -> None:
         if self.tracker is None or not self.correct_ids:
@@ -1092,6 +1206,8 @@ class SecurityQuizApp:
             return self.end_message
         if self.camera_error:
             return f"カメラエラー: {self.camera_error}"
+        if getattr(self, "sound_error", None):
+            return self.sound_error
         if self.worker is None:
             return self.camera_error or "カメラを利用できません。"
         _frame, _faces, _sequence, ready, error = self.worker.snapshot()
@@ -1156,11 +1272,6 @@ class SecurityQuizApp:
         if self.mode == "explanation":
             return (
                 "解説を表示・読み上げ中"
-                "  |  カメラ使用中・映像は保存／外部送信しません"
-            )
-        if self.mode == "exit":
-            return (
-                "退場時間中 | 不正解の参加者はカメラ範囲から出てください"
                 "  |  カメラ使用中・映像は保存／外部送信しません"
             )
         return (
@@ -1504,8 +1615,6 @@ class SecurityQuizApp:
             detail = "顔の検出数を確認中です。判定を一時停止しています。"
         elif self.mode == "reveal":
             detail = f"正解は「{question['answer']}」　解説まで"
-        elif self.mode == "exit":
-            detail = "不正解の人は3秒以内にカメラの範囲から出てください"
         else:
             detail = "回答中：左右に移動して〇か×を選んでください"
         detail_id = self.canvas.create_text(
@@ -1555,7 +1664,7 @@ class SecurityQuizApp:
             width, height,
             face_bounds=(width * 0.025, zone_top, width * 0.975, zone_bottom),
         )
-        duration = 3 if self.mode == "exit" else 5
+        duration = 5
         if self.mode == "answer" and self.extra_face_since is None:
             remaining = max(0, int(duration - (display_time - self.phase_started) + 0.999))
             size = 256
@@ -1617,7 +1726,7 @@ class SecurityQuizApp:
 
             fill = GREEN if detection.center_x < 0.5 else RED
             face_label = ""
-            if self.mode in ("reveal", "explanation", "exit"):
+            if self.mode in ("reveal", "explanation"):
                 if track_id in self.correct_ids:
                     fill = GREEN
                     face_label = "正解！"
@@ -1666,6 +1775,12 @@ class SecurityQuizApp:
         self._show_end_screen("notice", message)
 
     def _show_end_screen(self, mode: str, message: str) -> None:
+        if mode == "win":
+            self._play_sounds("CorrectAnswerFinal.mp3")
+        elif mode == "lose":
+            self._play_sounds("End_sound.mp3")
+        else:
+            self._stop_sounds()
         self.mode = mode
         self.phase_started = time.monotonic()
         self.end_message = message
@@ -1681,6 +1796,7 @@ class SecurityQuizApp:
             self.speech.stop()
 
     def close(self) -> None:
+        self._stop_sounds()
         if self.speech is not None:
             self.speech.stop()
         if self.worker is not None and not self.worker.stop():

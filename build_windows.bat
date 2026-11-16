@@ -12,11 +12,11 @@ if not defined PYTHON (
     exit /b 1
 )
 
-"%PYTHON%" -m PyInstaller --noconfirm --clean --onefile --windowed --name SecurityQuiz_Adjusted --add-data "261113セキュリティクイズ問題.json;." --add-data "BackgroundImage_Clean.png;." --collect-all cv2 --collect-all pygrabber --collect-all comtypes --hidden-import pygrabber.dshow_graph --hidden-import comtypes.client app.py
+"%PYTHON%" -m PyInstaller --noconfirm --clean --onefile --windowed --name SecurityQuiz_Adjusted --add-data "261113セキュリティクイズ問題.json;." --add-data "BackgroundImage_Clean.png;." --add-data "sound;sound" --collect-all cv2 --collect-all pygrabber --collect-all comtypes --hidden-import pygrabber.dshow_graph --hidden-import comtypes.client app.py
 goto finish
 
 :build_with_launcher
-py -3 -m PyInstaller --noconfirm --clean --onefile --windowed --name SecurityQuiz_Adjusted --add-data "261113セキュリティクイズ問題.json;." --add-data "BackgroundImage_Clean.png;." --collect-all cv2 --collect-all pygrabber --collect-all comtypes --hidden-import pygrabber.dshow_graph --hidden-import comtypes.client app.py
+py -3 -m PyInstaller --noconfirm --clean --onefile --windowed --name SecurityQuiz_Adjusted --add-data "261113セキュリティクイズ問題.json;." --add-data "BackgroundImage_Clean.png;." --add-data "sound;sound" --collect-all cv2 --collect-all pygrabber --collect-all comtypes --hidden-import pygrabber.dshow_graph --hidden-import comtypes.client app.py
 
 :finish
 if errorlevel 1 exit /b 1
