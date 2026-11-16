@@ -109,10 +109,7 @@ def load_question_sets(path: Path) -> dict[int, list[dict[str, Any]]]:
 class FaceTracker:
     """Match nearby face positions only; never identifies a person by appearance."""
 
-    MAX_STEP = 0.35
-    AMBIGUITY_MARGIN = 0.015
     MISSED_SECONDS_GRACE = 3.0
-    MAX_MISSED_SECONDS = 10.0
 
     def __init__(self, initial_detections: list[Detection]) -> None:
         if not 1 <= len(initial_detections) <= 5:
@@ -130,14 +127,6 @@ class FaceTracker:
             raise ExtraFacesError("新しい顔または追跡の入れ替わりを検出しました。")
 
         track_ids = list(self.tracks)
-        for track in self.tracks.values():
-            missing_start = (
-                track.missing_since
-                if track.missing_since is not None
-                else track.last_seen_at
-            )
-            if now - missing_start >= self.MAX_MISSED_SECONDS:
-                track.lost = True
         assignments: list[tuple[float, tuple[int, ...], tuple[int, ...]]] = []
         for chosen_tracks in itertools.combinations(track_ids, len(detections)):
             for detection_order in itertools.permutations(range(len(detections))):
@@ -165,26 +154,8 @@ class FaceTracker:
 
         assignments.sort(key=lambda item: item[0])
         best = assignments[0]
-        if len(assignments) > 1:
-            second = assignments[1]
-            if (
-                second[1:] != best[1:]
-                and second[0] - best[0] < self.AMBIGUITY_MARGIN
-            ):
-                raise TrackingError("顔位置を安全に区別できません。")
-
         assigned_detections: dict[int, Detection] = {}
         for track_id, detection_index in zip(best[1], best[2]):
-            if self.tracks[track_id].lost:
-                raise TrackingError("長時間見失った顔が再検出されました。")
-            distance = math.hypot(
-                self.tracks[track_id].detection.center_x
-                - detections[detection_index].center_x,
-                self.tracks[track_id].detection.center_y
-                - detections[detection_index].center_y,
-            )
-            if distance > self.MAX_STEP:
-                raise TrackingError("顔位置が急に変わり、追跡を継続できません。")
             assigned_detections[track_id] = detections[detection_index]
 
         for track_id, track in self.tracks.items():

@@ -57,10 +57,7 @@ START_COUNTDOWN_SECONDS = 10
 RESULT_SCREEN_SECONDS = 5
 WIN_SCREEN_SECONDS = 10
 QUESTION_INTRO_SECONDS = 4
-FACE_RECOVERY_SECONDS = 10
 COUNTDOWN_FACE_LOSS_GRACE_SECONDS = 2.0
-ANSWER_FACE_RETRY_SECONDS = 2.0
-EXTRA_FACE_RETRY_SECONDS = 2.0
 FONT_CANDIDATES = (
     "Noto Sans JP", "BIZ UDPゴシック", "BIZ UDPGothic", "Yu Gothic UI", "Meiryo UI"
 )
@@ -970,58 +967,29 @@ class SecurityQuizApp:
         if self.tracker is None:
             return
         now = time.monotonic()
-        if (
-            self.face_loss_since is not None
-            and now - self.face_loss_since >= FACE_RECOVERY_SECONDS
-        ):
-            self._return_home("顔を再検出できませんでした。ゲームを終了します。")
-            return
-        if (
-            self.extra_face_since is not None
-            and now - self.extra_face_since >= EXTRA_FACE_RETRY_SECONDS
-        ):
-            self._return_home(
-                "新しい顔または追跡の入れ替わりを検出しました。\n"
-                "誤判定を防ぐため、ゲームを終了しました。"
-            )
-            return
         try:
             self.tracker.update(self.latest_detections)
         except ExtraFacesError:
             if self.extra_face_since is None:
                 self.extra_face_since = now
+            if self.face_loss_since is None:
+                self.face_loss_since = now
             return
         except TrackingError as error:
             self._return_home(
                 f"{error}\n誤判定を防ぐため、ゲームを終了しました。"
             )
             return
-        if self.extra_face_since is not None:
-            paused = now - self.extra_face_since
-            if self.face_loss_since is None:
-                self.phase_started += paused
-                if self.correct_missing_since is not None:
-                    self.correct_missing_since += paused
-            self.extra_face_since = None
         self._sync_tracking_regions()
-        if self.mode in ("question_intro", "question", "answer"):
-            required_ids = set(self.tracker.tracks)
-        elif self.mode in ("reveal", "explanation"):
-            required_ids = self.correct_ids
-        else:
-            required_ids = set()
-        if required_ids - self.tracker.detected_ids():
+        if len(self.latest_detections) != len(self.tracker.tracks):
             if self.face_loss_since is None:
                 self.face_loss_since = now
             return
         if self.face_loss_since is not None:
             paused = now - self.face_loss_since
             self.phase_started += paused
-            if self.correct_missing_since is not None:
-                self.correct_missing_since += paused
             self.face_loss_since = None
-        if self.mode == "explanation" and self.correct_ids:
-            self._check_correct_presence()
+        self.extra_face_since = None
 
     def _sync_tracking_regions(self) -> None:
         if self.worker is not None:
@@ -1080,18 +1048,9 @@ class SecurityQuizApp:
             return
 
         if self.face_loss_since is not None:
-            if now - self.face_loss_since >= FACE_RECOVERY_SECONDS:
-                self._return_home("顔を再検出できませんでした。ゲームを終了します。")
-                return
-            if self.extra_face_since is None:
-                return
+            return
 
         if self.extra_face_since is not None:
-            if now - self.extra_face_since >= EXTRA_FACE_RETRY_SECONDS:
-                self._return_home(
-                    "新しい顔または追跡の入れ替わりを検出しました。\n"
-                    "誤判定を防ぐため、ゲームを終了しました。"
-                )
             return
 
         if self.mode == "countdown":
@@ -1144,20 +1103,12 @@ class SecurityQuizApp:
                 if self.tracker is None:
                     self._return_home("参加者を追跡できません。")
                     return
-                if (
-                    len(self.tracker.detected_ids()) < len(self.tracker.tracks)
-                    and now - self.phase_started < 5 + ANSWER_FACE_RETRY_SECONDS
-                ):
+                if len(self.tracker.detected_ids()) != len(self.tracker.tracks):
                     return
                 correct_answer = self._current_question()["answer"]
                 self.correct_ids, self.wrong_ids = self.tracker.answer(
                     correct_answer
                 )
-                if not self.tracker.detected_ids():
-                    self._return_home(
-                        "回答時間終了時に誰も検出できませんでした。未回答として終了します。"
-                    )
-                    return
                 self._stop_sounds()
                 self.mode = "reveal"
                 self.phase_started = now
@@ -1178,10 +1129,6 @@ class SecurityQuizApp:
                 return
 
         elif self.mode == "explanation":
-            if self.correct_ids:
-                self._check_correct_presence()
-                if self.mode != "explanation":
-                    return
             if (
                 now - self.phase_started >= 5
                 and self.speech.finished()
@@ -1190,20 +1137,6 @@ class SecurityQuizApp:
                     self._show_end_screen("lose", "残念！もう一度チャレンジして")
                 else:
                     self._continue_or_finish()
-
-    def _check_correct_presence(self) -> None:
-        if self.tracker is None or not self.correct_ids:
-            return
-        if self.correct_ids & self.tracker.visible_ids():
-            self.correct_missing_since = None
-            return
-        now = time.monotonic()
-        if self.correct_missing_since is None:
-            self.correct_missing_since = now
-        elif now - self.correct_missing_since >= 1:
-            self._return_home(
-                "正解者をカメラ内で確認できなくなりました。ゲームを終了します。"
-            )
 
     def _continue_or_finish(self) -> None:
         if not self.correct_ids:
@@ -1233,13 +1166,7 @@ class SecurityQuizApp:
         if not ready:
             return "カメラを確認しています…"
         if self.face_loss_since is not None:
-            remaining = max(
-                0,
-                math.ceil(
-                    FACE_RECOVERY_SECONDS - (time.monotonic() - self.face_loss_since)
-                ),
-            )
-            return f"参加者の顔を再確認中（残り{remaining}秒）"
+            return "参加人数を再確認中です。人数が揃うまで一時停止します。"
         if self.extra_face_since is not None:
             return "顔の検出数を確認中です。判定を一時停止しています。"
         if self.mode == "home":
@@ -1305,7 +1232,7 @@ class SecurityQuizApp:
         height = max(self.canvas.winfo_height(), 1)
         self._render_background(width, height)
         if self.face_loss_since is not None:
-            self._render_face_recovery(width, height, self.face_loss_since)
+            self._render_face_recovery(width, height)
         elif self.mode == "home":
             self._panel(width * 0.025, height * 0.04, width * 0.975, height * 0.96)
             self.canvas.create_text(
@@ -1440,12 +1367,7 @@ class SecurityQuizApp:
             left, top, right, bottom, fill=fill, outline=outline, width=border
         )
 
-    def _render_face_recovery(
-        self, width: int, height: int, loss_started: float
-    ) -> None:
-        remaining = max(
-            0, math.ceil(FACE_RECOVERY_SECONDS - (time.monotonic() - loss_started))
-        )
+    def _render_face_recovery(self, width: int, height: int) -> None:
         self._panel(width * 0.1, height * 0.15, width * 0.9, height * 0.85)
         self.canvas.create_text(
             width / 2, height * 0.3,
@@ -1454,14 +1376,16 @@ class SecurityQuizApp:
         )
         self.canvas.create_text(
             width / 2, height * 0.5,
-            text=str(remaining),
-            fill=AMBER, font=(self.font_family, 72, "bold"),
+            text="人数が揃うまで一時停止",
+            fill=AMBER, font=(self.font_family, 32, "bold"),
         )
         self.canvas.create_text(
             width / 2, height * 0.7,
             text="カメラの方を向いてお待ちください",
             fill=PALE_CYAN, font=(self.font_family, 24),
         )
+        if getattr(self, "latest_frame", None) is not None:
+            self._render_faces(width, height)
 
     def _render_reading(
         self, width: int, height: int, title: str, text: str

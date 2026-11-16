@@ -279,14 +279,14 @@ class FaceTrackerTests(unittest.TestCase):
             tracker.update([])
             self.assertEqual(tracker.visible_ids(), set())
 
-    def test_extra_or_ambiguous_faces_fail_closed(self):
+    def test_extra_faces_pause_but_ambiguous_positions_are_accepted(self):
         tracker = FaceTracker([self.face(0.2), self.face(0.8)])
         with self.assertRaises(TrackingError):
             tracker.update([self.face(0.2), self.face(0.5), self.face(0.8)])
 
         tracker = FaceTracker([self.face(0.45), self.face(0.55)])
-        with self.assertRaises(TrackingError):
-            tracker.update([self.face(0.5), self.face(0.501)])
+        tracker.update([self.face(0.5), self.face(0.501)])
+        self.assertEqual(tracker.detected_ids(), {1, 2})
 
     def test_lost_tracks_can_be_removed_after_exit(self):
         tracker = FaceTracker([self.face(0.2), self.face(0.8)])
@@ -294,14 +294,14 @@ class FaceTrackerTests(unittest.TestCase):
         tracker.retain({1})
         self.assertEqual(set(tracker.tracks), {1})
 
-    def test_long_lost_track_cannot_be_reassociated(self):
+    def test_long_lost_track_can_be_reassociated(self):
         with patch("quiz_core.time.monotonic", return_value=10):
             tracker = FaceTracker([self.face(0.2)])
         with patch("quiz_core.time.monotonic", return_value=13.1):
             tracker.update([])
         with patch("quiz_core.time.monotonic", return_value=23.1):
-            with self.assertRaises(TrackingError):
-                tracker.update([self.face(0.2)])
+            tracker.update([self.face(0.2)])
+            self.assertEqual(tracker.detected_ids(), {1})
 
     def test_face_can_be_reassociated_after_three_but_before_ten_seconds(self):
         with patch("quiz_core.time.monotonic", return_value=10):
@@ -478,7 +478,7 @@ class GameProgressTests(unittest.TestCase):
             app._render()
         labels = [call.kwargs.get("text") for call in app.canvas.create_text.call_args_list]
         self.assertIn("参加者の顔を確認しています", labels)
-        self.assertIn("6", labels)
+        self.assertIn("人数が揃うまで一時停止", labels)
 
     def test_background_is_reused_until_canvas_size_changes(self):
         app = self.make_app("home", 10)
@@ -575,7 +575,7 @@ class GameProgressTests(unittest.TestCase):
         self.assertEqual(app.mode, "reveal")
         app._return_home.assert_not_called()
 
-    def test_missing_face_times_out_even_if_face_returns_at_deadline(self):
+    def test_missing_face_waits_without_timeout_and_accepts_late_recovery(self):
         for process_frame in (False, True):
             with self.subTest(process_frame=process_frame):
                 app = self.make_app("question", 8)
@@ -585,15 +585,18 @@ class GameProgressTests(unittest.TestCase):
                 with patch("app.time.monotonic", return_value=11):
                     app._process_new_frame()
                 app.latest_detections = [FaceTrackerTests.face(0.2)]
-                with patch("app.time.monotonic", return_value=21):
+                with patch("app.time.monotonic", return_value=121):
                     if process_frame:
                         app._process_new_frame()
                     else:
                         app._advance_phase()
-                app._return_home.assert_called_once()
-                self.assertIn("再検出できません", app._return_home.call_args.args[0])
+                app._return_home.assert_not_called()
+                if process_frame:
+                    self.assertIsNone(app.face_loss_since)
+                else:
+                    self.assertEqual(app.face_loss_since, 11)
 
-    def test_missing_wrong_player_does_not_pause_explanation(self):
+    def test_missing_player_pauses_explanation(self):
         app = self.make_app("answer", 8)
         with patch("app.time.monotonic", return_value=10):
             app.tracker = FaceTracker([
@@ -608,7 +611,7 @@ class GameProgressTests(unittest.TestCase):
         app.face_loss_since = None
         with patch("app.time.monotonic", return_value=12):
             app._process_new_frame()
-        self.assertIsNone(app.face_loss_since)
+        self.assertEqual(app.face_loss_since, 12)
 
     def test_overlapping_extra_face_and_missing_face_pause_only_once(self):
         app = self.make_app("answer", 6)
@@ -629,7 +632,7 @@ class GameProgressTests(unittest.TestCase):
         self.assertIsNone(app.face_loss_since)
         self.assertIsNone(app.extra_face_since)
 
-    def test_unsafe_reassociation_still_stops_game(self):
+    def test_large_position_change_resumes_when_count_matches(self):
         app = self.make_app("question", 8)
         with patch("app.time.monotonic", return_value=10):
             app.tracker = FaceTracker([FaceTrackerTests.face(0.2)])
@@ -639,10 +642,11 @@ class GameProgressTests(unittest.TestCase):
         app.latest_detections = [FaceTrackerTests.face(0.8)]
         with patch("app.time.monotonic", return_value=15):
             app._process_new_frame()
-        app._return_home.assert_called_once()
-        self.assertIn("追跡", app._return_home.call_args.args[0])
+        app._return_home.assert_not_called()
+        self.assertIsNone(app.face_loss_since)
+        self.assertEqual(app.tracker.tracks[1].detection.center_x, 0.8)
 
-    def test_persistent_extra_face_stops_game_without_judging(self):
+    def test_persistent_extra_face_pauses_without_judging(self):
         app = self.make_app("answer", 6)
         with patch("app.time.monotonic", return_value=10):
             app.tracker = FaceTracker([FaceTrackerTests.face(0.2)])
@@ -652,13 +656,13 @@ class GameProgressTests(unittest.TestCase):
         ]
         with patch("app.time.monotonic", return_value=11):
             app._process_new_frame()
-        with patch("app.time.monotonic", return_value=13):
+        with patch("app.time.monotonic", return_value=113):
             app._advance_phase()
-        app._return_home.assert_called_once()
-        self.assertIn("新しい顔", app._return_home.call_args.args[0])
+        app._return_home.assert_not_called()
+        self.assertEqual(app.face_loss_since, 11)
         self.assertEqual(app.mode, "answer")
 
-    def test_extra_face_timeout_does_not_accept_late_recovery(self):
+    def test_extra_face_accepts_late_recovery(self):
         app = self.make_app("answer", 6)
         with patch("app.time.monotonic", return_value=10):
             app.tracker = FaceTracker([FaceTrackerTests.face(0.2)])
@@ -669,9 +673,10 @@ class GameProgressTests(unittest.TestCase):
         with patch("app.time.monotonic", return_value=11):
             app._process_new_frame()
         app.latest_detections = [FaceTrackerTests.face(0.2)]
-        with patch("app.time.monotonic", return_value=13):
+        with patch("app.time.monotonic", return_value=113):
             app._process_new_frame()
-        app._return_home.assert_called_once()
+        app._return_home.assert_not_called()
+        self.assertIsNone(app.face_loss_since)
 
     def test_answer_waits_for_missing_face_then_uses_fresh_detection(self):
         app = self.make_app("answer", 10)
@@ -686,13 +691,14 @@ class GameProgressTests(unittest.TestCase):
             app._advance_phase()
         self.assertEqual(app.mode, "reveal")
 
-    def test_answer_retry_times_out_when_no_face_returns(self):
+    def test_answer_waits_without_using_stale_faces(self):
         app = self.make_app("answer", 10)
         app.tracker.detected_ids.return_value = set()
         with patch("app.time.monotonic", return_value=17):
             app._advance_phase()
-        app._return_home.assert_called_once()
-        self.assertIn("未回答", app._return_home.call_args.args[0])
+        app._return_home.assert_not_called()
+        app.tracker.answer.assert_not_called()
+        self.assertEqual(app.mode, "answer")
 
     def test_staff_start_waits_for_face_without_consuming_set(self):
         app = SecurityQuizApp.__new__(SecurityQuizApp)
