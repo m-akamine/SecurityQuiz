@@ -397,10 +397,14 @@ class GameProgressTests(unittest.TestCase):
                 app.sound_effects.play.assert_called_once_with(expected)
                 self.assertEqual(app.mode, "reveal")
 
-    def test_wrong_players_go_directly_to_lose_screen(self):
+    def test_staff_can_choose_lose_screen(self):
         app = self.make_app("explanation", 10)
+        app.correct_ids = set()
+        app.wrong_ids = set()
         with patch("app.time.monotonic", return_value=16):
             app._advance_phase()
+        self.assertEqual(app.mode, "explanation")
+        app._staff_lose()
         self.assertEqual(app.mode, "lose")
         self.assertEqual(app.end_message, "残念！もう一度チャレンジして")
         app.sound_effects.play.assert_called_once_with("End_sound.mp3")
@@ -412,7 +416,7 @@ class GameProgressTests(unittest.TestCase):
         app._show_end_screen("lose", "残念！もう一度チャレンジして")
         app.sound_effects.play.assert_called_once_with("End_sound.mp3")
 
-    def test_temporary_extra_face_pauses_and_resumes_without_judging(self):
+    def test_extra_face_does_not_pause_and_does_not_guess_result(self):
         app = self.make_app("answer", 6)
         with patch("app.time.monotonic", return_value=10):
             app.tracker = FaceTracker([FaceTrackerTests.face(0.2)])
@@ -426,15 +430,10 @@ class GameProgressTests(unittest.TestCase):
         app._return_home.assert_not_called()
         with patch("app.time.monotonic", return_value=11.5):
             app._advance_phase()
-        self.assertEqual(app.mode, "answer")
-
-        app.latest_detections = [FaceTrackerTests.face(0.2)]
-        with patch("app.time.monotonic", return_value=12):
-            app._process_new_frame()
-            self.assertEqual(app.phase_started, 7)
-            app._advance_phase()
-        self.assertIsNone(app.extra_face_since)
         self.assertEqual(app.mode, "reveal")
+        self.assertEqual(app.correct_ids, set())
+        self.assertEqual(app.wrong_ids, set())
+        app.sound_effects.play.assert_not_called()
 
     def test_question_intro_waits_four_seconds_before_speaking_for_each_question(self):
         app = self.make_app("answer", 10)
@@ -453,7 +452,7 @@ class GameProgressTests(unittest.TestCase):
             self.assertEqual(app.mode, "question")
             app.speech.speak.assert_called_once_with("問題テキスト まるかばつか。")
 
-    def test_intro_and_recovery_screens_are_rendered(self):
+    def test_intro_screen_is_rendered(self):
         app = self.make_app("question_intro", 10)
         app.question_index = 1
         app.canvas = Mock()
@@ -470,15 +469,6 @@ class GameProgressTests(unittest.TestCase):
         app._render()
         labels = [call.kwargs.get("text") for call in app.canvas.create_text.call_args_list]
         self.assertIn("第2問", labels)
-
-        app.canvas.create_text.reset_mock()
-        app.mode = "answer"
-        app.face_loss_since = 10
-        with patch("app.time.monotonic", return_value=14):
-            app._render()
-        labels = [call.kwargs.get("text") for call in app.canvas.create_text.call_args_list]
-        self.assertIn("参加者の顔を確認しています", labels)
-        self.assertIn("人数が揃うまで一時停止", labels)
 
     def test_background_is_reused_until_canvas_size_changes(self):
         app = self.make_app("home", 10)
@@ -552,7 +542,7 @@ class GameProgressTests(unittest.TestCase):
             choose_japanese_font(("Yu Gothic UI", "Noto Sans JP")), "Noto Sans JP"
         )
 
-    def test_missing_face_pauses_answer_and_recovers_before_ten_seconds(self):
+    def test_missing_face_does_not_pause_answer(self):
         app = self.make_app("answer", 8)
         with patch("app.time.monotonic", return_value=10):
             app.tracker = FaceTracker([FaceTrackerTests.face(0.2)])
@@ -562,17 +552,8 @@ class GameProgressTests(unittest.TestCase):
         self.assertEqual(app.face_loss_since, 11)
         with patch("app.time.monotonic", return_value=20.9):
             app._advance_phase()
-            self.assertEqual(app.mode, "answer")
-            app.latest_detections = [FaceTrackerTests.face(0.2)]
-            app._process_new_frame()
-        self.assertIsNone(app.face_loss_since)
-        self.assertAlmostEqual(app.phase_started, 17.9)
-        with patch("app.time.monotonic", return_value=22.8):
-            app._advance_phase()
-        self.assertEqual(app.mode, "answer")
-        with patch("app.time.monotonic", return_value=22.9):
-            app._advance_phase()
         self.assertEqual(app.mode, "reveal")
+        self.assertEqual((app.correct_ids, app.wrong_ids), (set(), set()))
         app._return_home.assert_not_called()
 
     def test_missing_face_waits_without_timeout_and_accepts_late_recovery(self):
@@ -613,7 +594,7 @@ class GameProgressTests(unittest.TestCase):
             app._process_new_frame()
         self.assertEqual(app.face_loss_since, 12)
 
-    def test_overlapping_extra_face_and_missing_face_pause_only_once(self):
+    def test_detection_count_changes_do_not_shift_timer(self):
         app = self.make_app("answer", 6)
         with patch("app.time.monotonic", return_value=10):
             app.tracker = FaceTracker([FaceTrackerTests.face(0.2)])
@@ -628,7 +609,7 @@ class GameProgressTests(unittest.TestCase):
         app.latest_detections = [FaceTrackerTests.face(0.2)]
         with patch("app.time.monotonic", return_value=13):
             app._process_new_frame()
-        self.assertEqual(app.phase_started, 8)
+        self.assertEqual(app.phase_started, 6)
         self.assertIsNone(app.face_loss_since)
         self.assertIsNone(app.extra_face_since)
 
@@ -646,7 +627,7 @@ class GameProgressTests(unittest.TestCase):
         self.assertIsNone(app.face_loss_since)
         self.assertEqual(app.tracker.tracks[1].detection.center_x, 0.8)
 
-    def test_persistent_extra_face_pauses_without_judging(self):
+    def test_persistent_extra_face_progresses_without_judging(self):
         app = self.make_app("answer", 6)
         with patch("app.time.monotonic", return_value=10):
             app.tracker = FaceTracker([FaceTrackerTests.face(0.2)])
@@ -659,8 +640,9 @@ class GameProgressTests(unittest.TestCase):
         with patch("app.time.monotonic", return_value=113):
             app._advance_phase()
         app._return_home.assert_not_called()
-        self.assertEqual(app.face_loss_since, 11)
-        self.assertEqual(app.mode, "answer")
+        self.assertEqual(app.extra_face_since, 11)
+        self.assertEqual(app.mode, "reveal")
+        self.assertEqual((app.correct_ids, app.wrong_ids), (set(), set()))
 
     def test_extra_face_accepts_late_recovery(self):
         app = self.make_app("answer", 6)
@@ -678,27 +660,30 @@ class GameProgressTests(unittest.TestCase):
         app._return_home.assert_not_called()
         self.assertIsNone(app.face_loss_since)
 
-    def test_answer_waits_for_missing_face_then_uses_fresh_detection(self):
+    def test_answer_uses_recovered_detection_at_deadline(self):
         app = self.make_app("answer", 10)
         app.tracker.detected_ids.return_value = {1}
-        with patch("app.time.monotonic", return_value=15):
+        with patch("app.time.monotonic", return_value=14):
             app._advance_phase()
         self.assertEqual(app.mode, "answer")
         app.tracker.answer.assert_not_called()
 
         app.tracker.detected_ids.return_value = {1, 2}
-        with patch("app.time.monotonic", return_value=16):
+        with patch("app.time.monotonic", return_value=15):
             app._advance_phase()
         self.assertEqual(app.mode, "reveal")
+        app.tracker.answer.assert_called_once_with("〇")
 
-    def test_answer_waits_without_using_stale_faces(self):
+    def test_answer_progresses_without_using_stale_faces(self):
         app = self.make_app("answer", 10)
         app.tracker.detected_ids.return_value = set()
         with patch("app.time.monotonic", return_value=17):
             app._advance_phase()
         app._return_home.assert_not_called()
         app.tracker.answer.assert_not_called()
-        self.assertEqual(app.mode, "answer")
+        self.assertEqual(app.mode, "reveal")
+        self.assertEqual((app.correct_ids, app.wrong_ids), (set(), set()))
+        app.sound_effects.play.assert_not_called()
 
     def test_staff_start_waits_for_face_without_consuming_set(self):
         app = SecurityQuizApp.__new__(SecurityQuizApp)
@@ -718,6 +703,64 @@ class GameProgressTests(unittest.TestCase):
         self.assertEqual(app.mode, "waiting_for_players")
         self.assertEqual(app.next_set_id, 4)
         self.assertIn("顔を確認", app.home_message)
+
+    def test_staff_can_start_without_detected_faces(self):
+        app = self.make_countdown_app([])
+        app.mode = "waiting_for_players"
+        app._staff_start()
+        self.assertIsNone(app.tracker)
+        self.assertEqual(app.current_set_id, 3)
+        self.assertEqual(app.next_set_id, 4)
+        self.assertEqual(app.question_index, 0)
+        app._begin_question.assert_called_once_with()
+
+    def test_manual_game_without_tracker_progresses_without_judging(self):
+        app = self.make_app("answer", 10)
+        app.tracker = None
+        with patch("app.time.monotonic", return_value=15):
+            app._advance_phase()
+        self.assertEqual(app.mode, "reveal")
+        self.assertEqual((app.correct_ids, app.wrong_ids), (set(), set()))
+        app.sound_effects.stop.assert_called_once_with()
+        app.sound_effects.play.assert_not_called()
+        with patch("app.time.monotonic", return_value=20):
+            app._advance_phase()
+        self.assertEqual(app.mode, "explanation")
+        app.camera_error = None
+        app.worker = Mock()
+        app.worker.snapshot.return_value = (object(), [], 1, True, None)
+        self.assertIn("正誤を確認できませんでした", app._status_text())
+        self.assertIn("F8", app._status_text())
+        self.assertIn("F9", app._status_text())
+
+    def test_staff_keys_only_work_on_explanation(self):
+        app = self.make_app("answer", 10)
+        app._show_end_screen = Mock()
+        app._staff_next()
+        app._staff_lose()
+        app._continue_or_finish.assert_not_called()
+        app._show_end_screen.assert_not_called()
+        app.speech.stop.assert_not_called()
+
+    def test_staff_next_overrides_result_and_finishes_final_question(self):
+        for index in (0, 4):
+            with self.subTest(index=index):
+                app = self.make_app("explanation", 10)
+                app.question_index = index
+                app.correct_ids = set()
+                app._continue_or_finish = SecurityQuizApp._continue_or_finish.__get__(app)
+                app._begin_question = Mock()
+                app._show_end_screen = Mock()
+                app._staff_next()
+                app.speech.stop.assert_called_once_with()
+                if index == 0:
+                    self.assertEqual(app.question_index, 1)
+                    app._begin_question.assert_called_once_with()
+                    app._show_end_screen.assert_not_called()
+                else:
+                    app._show_end_screen.assert_called_once_with(
+                        "win", "おめでとう！全問正解！"
+                    )
 
     def test_update_dispatches_answer_phase_timer(self):
         app = SecurityQuizApp.__new__(SecurityQuizApp)
@@ -757,18 +800,59 @@ class GameProgressTests(unittest.TestCase):
         self.assertEqual(app.mode, "explanation")
         app.speech.speak.assert_called_once_with("解説テキスト")
 
-    def test_explanation_goes_to_lose_screen_when_anyone_is_wrong(self):
+    def test_explanation_automatically_ends_when_anyone_is_wrong(self):
         app = self.make_app("explanation", 10)
         with patch("app.time.monotonic", return_value=15):
             app._advance_phase()
         self.assertEqual(app.mode, "lose")
+        app._continue_or_finish.assert_not_called()
 
-    def test_explanation_continues_when_everyone_is_correct(self):
+    def test_explanation_automatically_continues_when_everyone_is_correct(self):
         app = self.make_app("explanation", 10)
         app.wrong_ids = set()
+        with patch("app.time.monotonic", return_value=14.9):
+            app._advance_phase()
+        app._continue_or_finish.assert_not_called()
+        app.speech.finished.return_value = False
         with patch("app.time.monotonic", return_value=15):
             app._advance_phase()
+        self.assertEqual(app.mode, "explanation")
+        app._continue_or_finish.assert_not_called()
+        app.speech.finished.return_value = True
+        with patch("app.time.monotonic", return_value=16):
+            app._advance_phase()
         app._continue_or_finish.assert_called_once_with()
+
+    def test_unverified_answer_waits_for_staff_even_after_face_recovery(self):
+        app = self.make_app("answer", 10)
+        app.tracker.detected_ids.return_value = {1}
+        with patch("app.time.monotonic", return_value=15):
+            app._advance_phase()
+        app.tracker.detected_ids.return_value = {1, 2}
+        with patch("app.time.monotonic", return_value=20):
+            app._advance_phase()
+        with patch("app.time.monotonic", return_value=1000):
+            app._advance_phase()
+        self.assertEqual(app.mode, "explanation")
+        app._continue_or_finish.assert_not_called()
+        app._staff_next()
+        app.speech.stop.assert_called_once_with()
+        app._continue_or_finish.assert_called_once_with()
+
+    def test_final_correct_answer_automatically_wins_even_if_face_disappears_later(self):
+        app = self.make_app("answer", 10)
+        app.tracker.answer.return_value = ({1, 2}, set())
+        app._continue_or_finish = SecurityQuizApp._continue_or_finish.__get__(app)
+        with patch("app.time.monotonic", return_value=15):
+            app._advance_phase()
+        app.face_loss_since = 16
+        with patch("app.time.monotonic", return_value=20):
+            app._advance_phase()
+        app.question_index = 4
+        with patch("app.time.monotonic", return_value=25):
+            app._advance_phase()
+        self.assertEqual(app.mode, "win")
+        app.sound_effects.play.assert_called_with("CorrectAnswerFinal.mp3")
 
     def make_countdown_app(self, detections):
         app = SecurityQuizApp.__new__(SecurityQuizApp)
@@ -983,7 +1067,7 @@ class GameProgressTests(unittest.TestCase):
         )
         self.assertEqual(timer_call.args[:2], (640, 380))
 
-    def test_selection_pause_displays_warning_and_freezes_bar(self):
+    def test_selection_timer_continues_with_extra_face(self):
         for mode in ("answer", "reveal"):
             with self.subTest(mode=mode):
                 app = self.make_app(mode, 10)
@@ -998,11 +1082,13 @@ class GameProgressTests(unittest.TestCase):
                     call.kwargs.get("text")
                     for call in app.canvas.create_text.call_args_list
                 ]
-                self.assertIn("顔の検出数を確認中です。判定を一時停止しています。", labels)
-                self.assertFalse(any(text in {"0", "1", "2", "3", "4", "5"} for text in labels))
+                if mode == "answer":
+                    self.assertIn("1", labels)
+                else:
+                    self.assertFalse(any(text in {"0", "1", "2", "3", "4", "5"} for text in labels))
                 bar = app.canvas.create_rectangle.call_args_list[-1]
                 self.assertAlmostEqual(
-                    bar.args[2], 40 + (1280 - 80) * 0.8
+                    bar.args[2], 40 + (1280 - 80) * 0.2
                 )
 
     def test_reveal_uses_selection_layout_and_shows_correct_answer(self):
@@ -1044,7 +1130,7 @@ class GameProgressTests(unittest.TestCase):
                         expected = highlighted if mode == "reveal" and elapsed != 0.5 else ["", ""]
                         self.assertEqual(fills, expected)
 
-    def test_reveal_flash_freezes_with_the_gauge_when_paused(self):
+    def test_reveal_flash_continues_with_extra_face(self):
         app = self.make_app("reveal", 10)
         app.sets[1][0]["level"] = 1
         app.extra_face_since = 10.5
@@ -1053,9 +1139,9 @@ class GameProgressTests(unittest.TestCase):
         app._render_faces = Mock()
         with patch("app.time.monotonic", return_value=12):
             app._render_game(1280, 760)
-        self.assertEqual(app.canvas.create_rectangle.call_args_list[1].kwargs["fill"], "")
+        self.assertEqual(app.canvas.create_rectangle.call_args_list[1].kwargs["fill"], "#A7F3D0")
         bar = app.canvas.create_rectangle.call_args_list[-1]
-        self.assertAlmostEqual(bar.args[2], 40 + (1280 - 80) * 0.9)
+        self.assertAlmostEqual(bar.args[2], 40 + (1280 - 80) * 0.6)
 
     def test_reveal_status_does_not_show_countdown(self):
         app = self.make_app("reveal", 10)
@@ -1085,7 +1171,17 @@ class GameProgressTests(unittest.TestCase):
 
         app.canvas.create_text.reset_mock()
         app._render_reading(960, 600, "解説", "解説文")
-        self.assertEqual(app.canvas.create_text.call_args_list[1].kwargs["fill"], "#BAE6FD")
+        text_calls = [call.kwargs for call in app.canvas.create_text.call_args_list]
+        self.assertIn("自動", text_calls[1]["text"])
+        self.assertEqual(text_calls[2]["text"], "解説文")
+        self.assertEqual(text_calls[2]["fill"], "#BAE6FD")
+        app.canvas.create_text.reset_mock()
+        app.correct_ids = set()
+        app.wrong_ids = set()
+        app._render_reading(960, 600, "解説", "解説文")
+        guidance = app.canvas.create_text.call_args_list[1].kwargs["text"]
+        self.assertIn("F8", guidance)
+        self.assertIn("F9", guidance)
 
     def test_error_screen_is_nonmodal_and_retains_reason(self):
         app = self.make_app("answer", 10)
