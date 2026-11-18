@@ -896,10 +896,7 @@ class SecurityQuizApp:
             else None
         )
         self._sync_tracking_regions()
-        self.current_set_id = self.next_set_id
-        self.next_set_id = self.next_set_id % 5 + 1
-        self.question_index = 0
-        self._begin_question()
+        self._start_next_set()
         return "break"
 
     def _staff_next(self, _event: tk.Event | None = None) -> str:
@@ -1058,6 +1055,12 @@ class SecurityQuizApp:
         self.phase_started = time.monotonic()
         self._play_sounds("Q_sound.mp3", f"Q{self.question_index + 1}.mp3")
 
+    def _start_next_set(self) -> None:
+        self.current_set_id = self.next_set_id
+        self.next_set_id = self.next_set_id % len(self.sets) + 1
+        self.question_index = 0
+        self._begin_question()
+
     def _play_sounds(self, *filenames: str) -> None:
         sound_effects = getattr(self, "sound_effects", None)
         if sound_effects is None:
@@ -1111,11 +1114,7 @@ class SecurityQuizApp:
                     self.home_message = str(error)
                     return
                 self._sync_tracking_regions()
-                self.current_set_id = self.next_set_id
-                self.next_set_id = self.next_set_id % 5 + 1
-                self.question_index = 0
-                self.mode = "question_intro"
-                self._begin_question()
+                self._start_next_set()
 
         elif self.mode == "question_intro":
             if now - self.phase_started >= QUESTION_INTRO_SECONDS:

@@ -262,6 +262,37 @@ class QuestionDataTests(unittest.TestCase):
             )
         )
 
+    def test_loads_variable_number_of_complete_sets(self):
+        data = json.loads(QUESTION_FILE.read_text(encoding="utf-8-sig"))
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "questions.json"
+            for count in (1, 5, 6, 8):
+                with self.subTest(count=count):
+                    source = data["sets"]
+                    sets = [
+                        dict(source[index % len(source)], set_id=index + 1)
+                        for index in range(count)
+                    ]
+                    path.write_text(
+                        json.dumps({"sets": sets}, ensure_ascii=False),
+                        encoding="utf-8",
+                    )
+                    loaded = load_question_sets(path)
+                    self.assertEqual(list(loaded), list(range(1, count + 1)))
+                    self.assertTrue(all(len(questions) == 5 for questions in loaded.values()))
+
+    def test_rejects_empty_or_nonsequential_sets(self):
+        data = json.loads(QUESTION_FILE.read_text(encoding="utf-8-sig"))
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "questions.json"
+            for sets in ([], data["sets"] + [dict(data["sets"][0], set_id=7)]):
+                with self.subTest(sets=len(sets)):
+                    path.write_text(
+                        json.dumps({"sets": sets}, ensure_ascii=False), encoding="utf-8"
+                    )
+                    with self.assertRaises(QuestionDataError):
+                        load_question_sets(path)
+
     def test_invalid_answer_is_rejected(self):
         data = json.loads(QUESTION_FILE.read_text(encoding="utf-8-sig"))
         data["sets"][0]["questions"][0]["answer"] = "〇か×"
@@ -938,11 +969,32 @@ class GameProgressTests(unittest.TestCase):
         app.speech = Mock()
         app.tracker = None
         app.worker = None
+        app.sets = {index: [] for index in range(1, 6)}
         app.next_set_id = 3
         app.current_set_id = 1
         app.question_index = 4
-        app._begin_question = Mock()
+        app._begin_question = Mock(side_effect=lambda: setattr(app, "mode", "question_intro"))
         return app
+
+    def test_set_cycle_uses_all_loaded_sets_for_both_start_methods(self):
+        for start_method in ("manual", "automatic"):
+            for count in (1, 5, 6, 8):
+                with self.subTest(start_method=start_method, count=count):
+                    app = self.make_countdown_app([FaceTrackerTests.face(0.5)])
+                    app.sets = {index: [] for index in range(1, count + 1)}
+                    app.next_set_id = 1
+                    for expected in list(range(1, count + 1)) + [1]:
+                        app.phase_started = 10
+                        app.countdown_last_face_seen_at = 20
+                        with patch("app.time.monotonic", return_value=20):
+                            if start_method == "manual":
+                                app.mode = "waiting_for_players"
+                                app._staff_start()
+                            else:
+                                app.mode = "countdown"
+                                app._advance_phase()
+                        self.assertEqual(app.current_set_id, expected)
+                        self.assertEqual(app.next_set_id, expected % count + 1)
 
     def test_waiting_for_one_face_starts_countdown(self):
         app = self.make_countdown_app([FaceTrackerTests.face(0.5)])

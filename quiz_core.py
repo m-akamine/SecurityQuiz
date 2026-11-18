@@ -59,8 +59,8 @@ def load_question_sets(path: Path) -> dict[int, list[dict[str, Any]]]:
         raise QuestionDataError("JSONの最上位に sets の配列が必要です。")
 
     sets = data["sets"]
-    if len(sets) != 5:
-        raise QuestionDataError("問題セットは5種類必要です。")
+    if not sets:
+        raise QuestionDataError("問題セットは1種類以上必要です。")
 
     result: dict[int, list[dict[str, Any]]] = {}
     for expected_set_id, question_set in enumerate(sets, start=1):
@@ -70,7 +70,7 @@ def load_question_sets(path: Path) -> dict[int, list[dict[str, Any]]]:
             type(question_set.get("set_id")) is not int
             or question_set["set_id"] != expected_set_id
         ):
-            raise QuestionDataError("セット番号は1から5まで順番に指定してください。")
+            raise QuestionDataError("セット番号は1から順番に指定してください。")
 
         questions = question_set.get("questions")
         if not isinstance(questions, list) or len(questions) != 5:
