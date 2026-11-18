@@ -39,8 +39,13 @@ Pythonをインストール済みのビルド用Windows PCで、次を一度実�
 py -3 -m pip install -r requirements-build.txt
 ```
 
-作成された `dist\SecurityQuiz_Adjusted.exe` を配布します。問題データ、背景画像と
-効果音、Python・アプリ依存ライブラリは実行ファイルに含まれるため、配布先にPythonは不要です。
+作成された `dist\SecurityQuiz_Adjusted.exe` と同じフォルダーに
+`261113セキュリティクイズ問題.json` を置いて、一緒に配布します。問題は起動時に
+exeと同じフォルダーのJSONから読み込みます。編集した問題を反映するにはアプリを
+再起動してください。JSONがない場合や形式が不正な場合は画面にエラーが表示され、
+ゲームを開始できません。ビルド時に `dist` にJSONがない場合はコピーされますが、
+既存のJSONは上書きしません。背景画像、効果音、Python・アプリ依存ライブラリは
+実行ファイルに含まれるため、配布先にPythonは不要です。
 配布先PCではカメラの使用を許可し、日本語音声（`ja-JP`）を利用できるようにしてください。
 Windows標準のPowerShellも読み上げに使用します。Windows向けの実行ファイルはWindows上で
 ビルドしてください。

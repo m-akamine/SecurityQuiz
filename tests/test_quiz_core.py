@@ -16,6 +16,7 @@ from app import (
     detect_faces,
     devices_from_names,
     merge_face_boxes,
+    question_file_path,
 )
 from quiz_core import (
     Detection,
@@ -218,6 +219,38 @@ class CameraDeviceTests(unittest.TestCase):
 
 
 class QuestionDataTests(unittest.TestCase):
+    def test_source_questions_are_resolved_relative_to_app_not_working_directory(self):
+        with patch("app.sys.frozen", False, create=True):
+            self.assertEqual(question_file_path(), QUESTION_FILE)
+
+    def test_frozen_questions_are_loaded_from_executable_directory(self):
+        data = json.loads(QUESTION_FILE.read_text(encoding="utf-8-sig"))
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / QUESTION_FILE.name
+            data["sets"][0]["questions"][0]["question"] = "外部ファイルの問題"
+            path.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+            with patch("app.sys.frozen", True, create=True), patch(
+                "app.sys.executable", str(Path(temp_dir) / "quiz.exe")
+            ):
+                self.assertEqual(question_file_path(), path)
+                self.assertEqual(
+                    load_question_sets(question_file_path())[1][0]["question"],
+                    "外部ファイルの問題",
+                )
+                data["sets"][0]["questions"][0]["question"] = "編集後の問題"
+                path.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+                self.assertEqual(
+                    load_question_sets(question_file_path())[1][0]["question"],
+                    "編集後の問題",
+                )
+                path.write_text("{", encoding="utf-8")
+                with self.assertRaises(QuestionDataError):
+                    load_question_sets(question_file_path())
+                path.unlink()
+                with self.assertRaises(QuestionDataError) as error:
+                    load_question_sets(question_file_path())
+                self.assertIn(str(path), str(error.exception))
+
     def test_shipped_questions_have_five_complete_sets(self):
         sets = load_question_sets(QUESTION_FILE)
         self.assertEqual(list(sets), [1, 2, 3, 4, 5])

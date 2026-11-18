@@ -9,6 +9,7 @@ import math
 import os
 import shutil
 import subprocess
+import sys
 import tempfile
 import threading
 import time
@@ -40,7 +41,7 @@ from quiz_core import (
 
 
 APP_TITLE = "セキュリティ〇×クイズ"
-QUESTION_FILE = Path(__file__).with_name("261113セキュリティクイズ問題.json")
+QUESTION_FILENAME = "261113セキュリティクイズ問題.json"
 BACKGROUND_FILE = Path(__file__).with_name("BackgroundImage_Clean.png")
 PANEL = "#0B1D26"
 SUBPANEL = "#102A36"
@@ -61,6 +62,15 @@ COUNTDOWN_FACE_LOSS_GRACE_SECONDS = 2.0
 FONT_CANDIDATES = (
     "Noto Sans JP", "BIZ UDPゴシック", "BIZ UDPGothic", "Yu Gothic UI", "Meiryo UI"
 )
+
+
+def question_file_path() -> Path:
+    directory = (
+        Path(sys.executable).parent
+        if getattr(sys, "frozen", False)
+        else Path(__file__).parent
+    )
+    return directory / QUESTION_FILENAME
 
 
 def choose_japanese_font(available: tuple[str, ...]) -> str:
@@ -586,7 +596,7 @@ class SecurityQuizApp:
         self.sets: dict[int, list[dict]] = {}
         self.setup_errors: list[str] = []
         try:
-            self.sets = load_question_sets(QUESTION_FILE)
+            self.sets = load_question_sets(question_file_path())
         except QuestionDataError as error:
             self.setup_errors.append(str(error))
 

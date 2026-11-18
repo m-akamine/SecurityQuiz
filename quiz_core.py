@@ -45,7 +45,7 @@ def load_question_sets(path: Path) -> dict[int, list[dict[str, Any]]]:
         with path.open("r", encoding="utf-8-sig") as question_file:
             data = json.load(question_file)
     except FileNotFoundError as error:
-        raise QuestionDataError(f"問題ファイルが見つかりません: {path.name}") from error
+        raise QuestionDataError(f"問題ファイルが見つかりません: {path}") from error
     except json.JSONDecodeError as error:
         raise QuestionDataError(
             f"問題JSONの形式が正しくありません（{error.lineno}行目）"
